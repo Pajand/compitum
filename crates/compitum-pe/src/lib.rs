@@ -52,12 +52,14 @@ pub mod fixture;
 pub mod machine;
 pub mod parser;
 pub mod reader;
+pub mod scanner;
 
 pub use error::{PeError, Result};
 pub use machine::{AbiFamily, Machine};
 pub use parser::{
     looks_like_pe, parse, CoffHeader, ImportedModule, OptionalHeader, PeImage, Section, Subsystem,
 };
+pub use scanner::{scan_code, scan_image, ScanReport, MAX_SCAN_BYTES};
 
 /// Synthetic PE construction, re-exported under a descriptive name.
 ///
