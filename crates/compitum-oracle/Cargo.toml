@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 compitum-json = { workspace = true }
+compitum-digest = { workspace = true }
 compitum-isa = { workspace = true }
 compitum-pe = { workspace = true }
 compitum-router = { workspace = true }

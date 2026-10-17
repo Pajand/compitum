@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/compitum-json",
+    "crates/compitum-digest",
     "crates/compitum-i18n",
     "crates/compitum-isa",
     "crates/compitum-pe",
@@ -22,6 +23,7 @@ description = "ABI-aware ARM64 compatibility layer: classify, verify, route."
 
 [workspace.dependencies]
 compitum-json = { path = "crates/compitum-json" }
+compitum-digest = { path = "crates/compitum-digest" }
 compitum-i18n = { path = "crates/compitum-i18n" }
 compitum-isa = { path = "crates/compitum-isa" }
 compitum-pe = { path = "crates/compitum-pe" }

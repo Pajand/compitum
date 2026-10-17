@@ -1,0 +1,11 @@
+[package]
+name = "compitum-digest"
+description = "SHA-256 for content-addressing binaries, with no external dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
