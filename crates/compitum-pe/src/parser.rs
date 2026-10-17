@@ -30,7 +30,7 @@
 
 use crate::error::{PeError, Result};
 use crate::machine::{AbiFamily, Machine};
-use crate::reader::{bytes_at, fixed_ascii, u16_at, u32_at, u64_at};
+use crate::reader::{fixed_ascii, u16_at, u32_at, u64_at};
 
 /// `IMAGE_DOS_HEADER` size in bytes; `e_lfanew` lives at offset 0x3C.
 const DOS_HEADER_MIN: usize = 0x40;
@@ -581,23 +581,6 @@ fn parse_coff(data: &[u8], offset: usize) -> Result<CoffHeader> {
         optional_header_size,
         characteristics,
     })
-}
-
-/// The fixed prefix of the optional header, shared by both layouts.
-struct OptionalPrefix {
-    magic: u16,
-    linker_major: u8,
-    linker_minor: u8,
-    os_version: (u16, u16),
-    image_base: u64,
-    section_alignment: u32,
-    file_alignment: u32,
-    subsystem: Subsystem,
-    dll_characteristics: u16,
-    size_of_image: u32,
-    size_of_headers: u32,
-    /// Offset of the data-directory array, relative to the start of the optional header.
-    data_directory_offset: usize,
 }
 
 fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeader> {

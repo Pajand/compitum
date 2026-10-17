@@ -159,17 +159,20 @@ crashes. COMPITUM treats page size as a first-class compatibility axis.
 
 | # | Deliverable | Status |
 |---|---|---|
-| 0.1 | Workspace + build system | ⬜ |
-| 0.2 | `compitum-json` — dependency-free JSON | ⬜ |
-| 0.3 | `compitum-i18n` — localization engine, English base | ⬜ |
-| 0.4 | `compitum-pe` — PE parser + classifier | ⬜ |
-| 0.5 | `compitum-isa` — host capability oracle | ⬜ |
-| 0.6 | `compitum-router` — ABI routing engine | ⬜ |
-| 0.7 | `compitum-oracle` — compatibility store | ⬜ |
-| 0.8 | `compitum` CLI — unified front end | ⬜ |
-| 0.9 | Synthetic PE corpus generator | ⬜ |
-| 0.10 | Test suite + real device verification | ⬜ |
-| 0.11 | Documentation set | ⬜ |
+| 0.1 | Workspace + build system | ✅ done | 8 crates, zero external dependencies, builds offline |
+| 0.2 | `compitum-json` — dependency-free JSON | ✅ done | strict RFC 8259 parser; surrogate pairs; depth bounded |
+| 0.3 | `compitum-i18n` — localization engine, English base | ✅ done | English compiled in; a language is one JSON file, no rebuild |
+| 0.4 | `compitum-pe` — PE parser + classifier | ✅ done | three ARM64 flavours distinguished; 500-case mutation test |
+| 0.5 | `compitum-isa` — host capability oracle | ✅ done | 67 features; bit tables verified against a live kernel |
+| 0.6 | `compitum-router` — ABI routing engine | ✅ done | 7 routes, 22 reason codes; purity asserted by test |
+| 0.7 | `compitum-oracle` — compatibility store | ⬜ next | |
+| 0.8 | `compitum` CLI — unified front end | ⬜ | |
+| 0.9 | Synthetic PE corpus generator | ✅ done | `compitum_pe::pe_fixture`, shared across all layers |
+| 0.10 | Test suite + real device verification | ✅ partial | 205 tests passing; ISA verified on a real device |
+| 0.11 | Documentation set | ✅ partial | strategy, roadmap, naming, security, trademark |
+
+**Totals at this revision:** 205 tests passing, zero build warnings, ~8,400 lines of Rust
+across five implemented crates.
 
 ### PHASE 1 — EXECUTION BRIDGE (next)
 - Integrate `proton-wine` (bionic-native) as the NT-syscall translator
@@ -235,6 +238,44 @@ python3           → 3.12.13
 Finding: host lacks SVE2/SME — a real divergence from RTX Spark. Recorded as first
 Oracle seed data.
 
+**2026-10-18 — Layers 1 to 3 implemented and verified**
+
+```
+cargo build   -> clean, zero warnings
+cargo test    -> exit 0, 205 passing, 0 failing
+```
+
+Five defects were found by the test suite during implementation. All are fixed, and each
+left a regression guard behind:
+
+1. **The HWCAP2 bit table was wrong.** The bitmap was shifted, so a device reporting
+   `HWCAP2 = 0x22181` decoded as claiming capabilities at the wrong bit positions. The
+   tool would have reported CPU features the hardware does not implement — the most
+   damaging possible failure for a compatibility tool, because it promises native
+   execution that then faults. Corrected against the kernel header and pinned by a
+   reference-device test.
+
+2. **`RequirementSource` ordered by declaration, not by strength.** The derived `Ord`
+   ranked variants by where they sit in the source file. Weak scan evidence could
+   therefore overwrite strong metadata evidence. Replaced with an explicit `rank()`.
+
+3. **Numeric overflow on hostile input.** `offset + len` wrapped for offsets near
+   `usize::MAX`: a panic in debug, and a silent read of attacker-chosen bytes in release.
+   Every range computation now routes through `checked_end`.
+
+4. **The severity model inverted the meaning of a requirement.** 
+   `ArchitectureRequiresTranslation` was classified `Blocked`, so *every* x86-64 image
+   reported as a refusal even with a working translator installed. A requirement is not
+   an obstacle; only `BackendAbsent` blocks. Two regression guards now pin the exact set
+   of blocking codes.
+
+5. **A doctest named modules that do not exist.** `compitum_pe::machine` collides with the
+   analysed `Machine` type, so fixture constants stay namespaced under `pe_fixture`.
+
+Finding 4 is the one worth dwelling on. The test suite did not merely confirm that the code
+works — it found a reasoning error that would have made the product confidently wrong about
+the single most common class of Windows binary in existence.
+
 ---
 
 ## 7. DECISION LOG
@@ -246,3 +287,7 @@ Oracle seed data.
 | 2026-10-18 | CLI before Android | Avoids the GPU driver wall entirely |
 | 2026-10-18 | Oracle is a first-class product | Data network effect is the only durable moat |
 | 2026-10-18 | No permanent forks of Wine/FEX | Upstream-first; our value is the routing + data layers |
+| 2026-10-18 | Renamed TESSERA to COMPITUM | TESSERA collided with a litigious semiconductor IP company; COMPITUM is free on every registry |
+| 2026-10-18 | Routing decisions must be pure functions | A decision that varies with ambient state cannot be replayed from an Oracle record, which would make the stored evidence worthless |
+| 2026-10-18 | A requirement is not an obstacle | Only `BackendAbsent`, `IsaFeaturesMissing`, `SyscallLayerAbsent`, `ArchitectureUnsupported` and `UnreadableSubject` block a route |
+| 2026-10-18 | Box64 alone cannot serve an ARM64EC image | The hybrid route needs a translator that coexists with native code in one process; that is FEX-specific |

@@ -40,6 +40,27 @@ Every existing compatibility tool treats them the same way. COMPITUM does not.
 
 **COMPITUM has a routing decision. Everyone else has a single path.**
 
+### What that decision is worth
+
+An ARM64EC image contains AArch64 code *and* x86-64 code in one file. A tool that knows
+only "this is a hybrid, therefore emulate it" sends it to a full translator and ends up
+translating code that was already native.
+
+| Route | What gets translated | Expected throughput |
+|---|---|---|
+| `native` | nothing | 100% |
+| `pick_native_slice` | nothing, after slice selection | 100% |
+| `fex_partial` | only the x86-64 blocks | 70-90% |
+| `box64_full` / `fex_full` | every instruction | 30-60% |
+| `wow64` | every instruction, 32-bit | 20-40% |
+| `refused` | nothing — impossible, with a reason naming the obstacle | — |
+
+Keeping `fex_partial` distinct from `fex_full` is where the performance comes from. It is
+the difference between a tool that classifies a binary and a tool that understands it.
+
+Every route carries its reasons as machine-readable codes plus an English sentence, so a
+verdict can be audited rather than merely believed.
+
 ---
 
 ## The three things nobody else does

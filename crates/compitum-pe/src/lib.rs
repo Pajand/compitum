@@ -48,6 +48,7 @@
 #![warn(missing_docs)]
 
 pub mod error;
+pub mod fixture;
 pub mod machine;
 pub mod parser;
 pub mod reader;
@@ -57,3 +58,18 @@ pub use machine::{AbiFamily, Machine};
 pub use parser::{
     looks_like_pe, parse, CoffHeader, ImportedModule, OptionalHeader, PeImage, Section, Subsystem,
 };
+
+/// Synthetic PE construction, re-exported under a descriptive name.
+///
+/// The module is also available as [`fixture`]; this alias exists so call sites read as
+/// `pe_fixture::synthetic(...)`, which is unambiguous about what is being built.
+pub use fixture as pe_fixture;
+
+/// The fixture module's machine-type and subsystem constants are reached through
+/// [`pe_fixture`], for example `pe_fixture::machine::ARM64` and
+/// `pe_fixture::subsystem::CONSOLE`.
+///
+/// They are deliberately *not* re-exported at the crate root: the root already has a
+/// [`machine`] module holding the analysed [`Machine`] type, and two modules with the
+/// same name in one namespace is a compile error rather than a convenience.
+pub use fixture as _fixture_constants_marker;
