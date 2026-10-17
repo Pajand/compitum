@@ -1,0 +1,15 @@
+[package]
+name = "compitum-oracle"
+description = "The compatibility ledger: every verified (binary x host x outcome) observation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+compitum-json = { workspace = true }
+compitum-isa = { workspace = true }
+compitum-pe = { workspace = true }
+compitum-router = { workspace = true }

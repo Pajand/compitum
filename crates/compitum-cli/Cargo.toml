@@ -1,0 +1,21 @@
+[package]
+name = "compitum-cli"
+description = "Command-line interface for COMPITUM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "compitum"
+path = "src/main.rs"
+
+[dependencies]
+compitum-json = { workspace = true }
+compitum-i18n = { workspace = true }
+compitum-isa = { workspace = true }
+compitum-pe = { workspace = true }
+compitum-router = { workspace = true }
+compitum-oracle = { workspace = true }

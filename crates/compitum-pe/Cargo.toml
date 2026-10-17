@@ -1,0 +1,13 @@
+[package]
+name = "compitum-pe"
+description = "PE/COFF parsing and ARM64 binary classification for COMPITUM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+compitum-json = { workspace = true }
+compitum-isa = { workspace = true }

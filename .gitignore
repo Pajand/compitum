@@ -1,0 +1,27 @@
+# Build output
+/target
+**/target/
+
+# Rust incremental and profiling artefacts
+*.profraw
+*.profdata
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local scratch space for the Oracle ledger and scratch binaries during development.
+# Committed fixtures live under tests/corpus and are deliberately NOT ignored.
+/oracle-data/
+/scratch/
+*.exe.bak
+
+# Never commit secrets. Namespace tokens are injected as environment variables at
+# publish time; see SECURITY.md.
+.npmrc
+*.pem
+*.key
