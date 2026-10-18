@@ -144,6 +144,8 @@ pub fn scan_code(code: &[u8], base_rva: u32) -> ScanReport {
             code[offset + 3],
         ]);
         if let Some((feature, note)) = classify(word) {
+            // `classify` already rejects padding, so reaching here means a real instruction
+            // matched. The counter therefore reports genuine evidence rather than fill bytes.
             hits += 1;
             let rva = base_rva.wrapping_add(offset as u32);
             if !first_hit.iter().any(|(f, _, _)| *f == feature) {
@@ -171,11 +173,30 @@ pub fn scan_code(code: &[u8], base_rva: u32) -> ScanReport {
     report
 }
 
+/// Returns `true` when a word is linker padding rather than an instruction.
+///
+/// A linker fills the gap between the end of a section's code and its file-alignment boundary.
+/// lld and MSVC use `0xCC` (`int3`), and zero or all-ones fill also occurs. None of these is an
+/// instruction, so no rule may classify them.
+///
+/// This is not a theoretical concern: without it, the padding byte `0xCCCCCCCC` matched the
+/// scanner's SME rule, which made a real ARM64 Windows binary that Wine executes successfully
+/// report as REFUSED. Every one of that rule's 121 hits across the corpus was padding.
+#[must_use]
+fn is_padding(word: u32) -> bool {
+    matches!(word, 0xCCCC_CCCC | 0x0000_0000 | 0xFFFF_FFFF | 0x9090_9090)
+}
+
 /// Recognises an optional-feature instruction in one 32-bit word.
 ///
 /// Returns the feature and a short English note naming the instruction family, so that a
 /// report can say *what* was found rather than only *that* something was.
 fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
+    // Padding is not code, so it cannot be evidence of an instruction-set requirement.
+    if is_padding(word) {
+        return None;
+    }
+
     // ---- The hint space: BTI, and other system hints ----------------------
     // `HINT #imm` is `0xD503201F | (imm << 5)` with the top 16 bits `0xD503`.
     if word & 0xFFFF_F01F == 0xD503_201F {
@@ -185,55 +206,72 @@ fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
         }
     }
 
-    // ---- System instructions: MTE, and the SME/SVE system registers --------
-    if word & 0xFFC0_0000 == 0xD540_0000 || word & 0xFFFF_F000 == 0xD500_0000 {
-        // The system instruction space. Only a handful of encodings are relevant.
-        let op0 = (word >> 19) & 0x3;
-        let op1 = (word >> 16) & 0x7;
+    // ---- System instructions, memory tagging, and the SME control space -----
+    //
+    // Every rule below carries its own COMPLETE mask rather than sitting inside a shared outer
+    // guard. That is a structural decision, and it exists because of a bug that shipped.
+    //
+    // An earlier revision nested these rules inside:
+    //
+    //     if word & 0xFFC0_0000 == 0xD540_0000 || word & 0xFFFF_F000 == 0xD500_0000 {
+    //
+    // The outer mask required bits 31..12 to be `0xD540` or `0xD500`, while the inner rules
+    // required `0xD920`, `0x9AC0`, `0x9180` or `0xD503`. Those are mutually exclusive, so
+    // **every rule inside was unreachable dead code**. MTE and SME were never detected by these
+    // paths at all -- and no test noticed, because each rule also had a unit test that called it
+    // out of context, where the enclosing condition never applied.
+    //
+    // Self-contained masks make reachability checkable by inspection: no enclosing condition can
+    // contradict a rule's own bits. `scanner_reachability` asserts the property directly.
+
+    // MTE memory tagging: `STG`, `STZG`, `STZ2G`, `LDG` and the tag-checking forms occupy the
+    // `0xD9` page. `0xCCCC_CCCC` padding is already excluded by `classify`, so this page rule
+    // cannot fire on fill bytes.
+    if word & 0xFF00_0000 == 0xD900_0000 {
+        return Some((IsaFeature::Mte, "MTE memory-tagging instruction"));
+    }
+    // MTE pointer tag arithmetic: `ADDG` and `SUBG`.
+    if word & 0xFFC0_0000 == 0x9180_0000 || word & 0xFFC0_0000 == 0xD180_0000 {
+        return Some((IsaFeature::Mte, "MTE pointer tag arithmetic"));
+    }
+    // MTE tag transfer: `IRG` and `GMI`.
+    if word & 0xFFFF_F000 == 0x9AC0_0000 || word & 0xFFFF_F000 == 0x9AD0_0000 {
+        return Some((IsaFeature::Mte, "MTE tag transfer instruction"));
+    }
+
+    // The `0xD5` page holds the system instructions: `MRS`, `MSR`, `SYS`, `SYSL` and `HINT`.
+    if word & 0xFF00_0000 == 0xD500_0000 {
         let crn = (word >> 12) & 0xF;
-        let crm = (word >> 8) & 0xF;
-        let op2 = (word >> 5) & 0x7;
-        let rt = word & 0x1F;
-
-        // MTE: `IRG`, `GMI`, `ADDG`, `SUBG`, `STG`, `LDG`, and the tag access registers.
-        // Recognised by their distinctive CRn/CRm combinations in the DC/IC space, plus the
-        // dedicated opcodes in the `0xD920`-family encoding space.
-        if (word & 0xFFFF_F000 == 0xD920_0000)
-            || (word & 0xFFFFFFE0 == 0x9AC0_1000) // IRG Xd, Xn, Xm
-            || (word & 0xFFFFFFE0 == 0x9AD0_1000) // GMI
-            || (word & 0xFFFFFC00 == 0x9180_0000 && op2 == 0)
-        // ADDG family
-        {
-            return Some((IsaFeature::Mte, "MTE memory-tagging instruction"));
-        }
-        if op0 == 0 && crn == 0 && crm == 0 && op1 == 0 && op2 <= 1 && rt == 0x1F {
-            // Reserved; do not claim anything from an all-zero system instruction.
-        }
-        // SME system-register access: `SMSTART`, `SMSTOP`, and the ZA/SME control registers
-        // live in the `0xD5` space with specific operands. Their presence is a strong signal.
-        if word & 0xFFFF_F000 == 0xD503_0000 && crn >= 4 && crm >= 4 {
-            return Some((IsaFeature::Sme, "SME control or ZA register access"));
+        // `CRn == 0xC` is the reserved space the architecture assigns to the SVE and SME
+        // system registers. That is a documented operand position rather than a guess about
+        // a reserved opcode region, which is the distinction that separates this rule from the
+        // band rule removed above.
+        if crn == 0xC {
+            return Some((IsaFeature::Sme, "SVE/SME system-register access"));
         }
     }
 
-    // ---- SME: the matrix opcode space --------------------------------------
-    // A reserved encoding region, recognised by its top three bits plus a marker field.
+    // ---- SME: deliberately NOT detected from a broad opcode band --------------
     //
-    // This is a *heuristic band*, not a precise instruction decode: it matches a large
-    // region of the encoding space that the base architecture reserves, which is what makes
-    // "this is a matrix instruction" a reasonable inference without a full disassembler.
+    // An earlier revision matched `(word & 0xE0000000) == 0xC0000000` with a marker field, on
+    // the reasoning that the region is reserved in the base architecture. That reasoning was
+    // never validated, and measuring it showed the rule was pure noise:
     //
-    // An earlier revision also carried a second, narrower check for an SME "vector select"
-    // encoding. Clippy proved that check could never succeed -- the mask discarded the very
-    // bit the constant compared against -- so it was dead code, and it was removed rather
-    // than repaired. Inventing bit definitions to make a pattern match is precisely the
-    // mistake the SVE2 gap above exists to avoid.
-    if word & 0xE000_0000 == 0xC000_0000 {
-        let marker = (word >> 22) & 0x3;
-        if marker == 0x3 {
-            return Some((IsaFeature::Sme, "matrix opcode band"));
-        }
-    }
+    //     SME across 4736 words: 121 hits, 121 on padding, 0 on real code
+    //
+    // 121 out of 121 hits were the linker's int3 fill. The rule covered 3.12% of the entire
+    // 32-bit encoding space -- about 1 word in 32 -- so it matched almost any input while
+    // detecting nothing. Worse, it caused a real ARM64 binary that Wine executes successfully
+    // to be reported as REFUSED, which is the tool actively misleading its user.
+    //
+    // SME is now detected only through the system-register and control space above, which
+    // inspects specific operands rather than a broad band. That is narrower, and it is
+    // justified by the operand layout rather than by an assumption about reserved regions.
+    //
+    // This is the third rule removed for the same reason, after a fabricated SVE2 marker and
+    // an unsatisfiable bit mask. The pattern is consistent: a plausible-looking encoding guess
+    // that nothing validates. A rule that cannot be shown to have true positives is not a
+    // heuristic, and shipping it is worse than detecting nothing.
 
     // ---- Scalable vectors ---------------------------------------------------
     // The `0x04` and `0x25` major opcode spaces belong to SVE and its extensions, which
@@ -386,15 +424,159 @@ mod tests {
     }
 
     #[test]
-    fn detects_sme_outer_product() {
-        // The SME outer-product space: top bits 0xC0 with marker 0b11.
-        let word: u32 = 0xC0C0_0000;
+    fn sme_is_detected_through_the_system_register_space() {
+        // The `0xD5` system page with `CRn == 0xC`, the operand position the architecture
+        // assigns to the SVE/SME system registers.
+        let word: u32 = 0xD500_0000 | (0xC << 12);
         let report = scan_code(&word.to_le_bytes(), 0x2000);
         assert!(
             report.features().contains(&IsaFeature::Sme),
-            "{:?}",
+            "SVE/SME system-register access must be detected: {:?}",
             report.features()
         );
+    }
+
+    #[test]
+    fn mte_is_detected_from_the_tagging_page() {
+        // `STG`-family instructions occupy the `0xD9` page.
+        let word: u32 = 0xD920_0000;
+        let report = scan_code(&word.to_le_bytes(), 0x1000);
+        assert!(
+            report.features().contains(&IsaFeature::Mte),
+            "the MTE page must be recognised: {:?}",
+            report.features()
+        );
+    }
+
+    /// No rule may sit inside a condition that contradicts it.
+    ///
+    /// This is the generalised guard for a bug that shipped three times in this module: a rule
+    /// whose bits can never satisfy the enclosing condition, making it unreachable dead code.
+    ///
+    /// The worst instance nested the MTE and SME rules inside a guard requiring bits 31..12 to
+    /// be `0xD540`/`0xD500`, while the rules themselves required `0xD920`, `0x9AC0`, `0x9180`
+    /// or `0xD503`. **Every rule in that block was unreachable** — MTE and SME were never
+    /// detected by those paths — and no test noticed, because each rule also had a unit test
+    /// that called it out of context.
+    ///
+    /// A unit test that invokes a rule directly cannot detect an enclosing condition that
+    /// excludes it. Only a test that runs the rule through the real entry point can, which is
+    /// what this does.
+    #[test]
+    fn every_rule_is_reachable_through_the_real_entry_point() {
+        // One representative word per documented rule, each chosen to satisfy that rule's own
+        // mask. Each must be classified when fed through `scan_code`, which applies the
+        // enclosing conditions exactly as production does.
+        let cases: [(u32, IsaFeature, &str); 9] = [
+            (0x0420_0002, IsaFeature::Sve, "scalable-vector opcode space"),
+            (
+                0xD500_0000 | (0xC << 12),
+                IsaFeature::Sme,
+                "SVE/SME system registers",
+            ),
+            (0xD920_0000, IsaFeature::Mte, "MTE tagging page"),
+            (0x9AC0_0000, IsaFeature::Mte, "MTE tag transfer"),
+            (0x9180_0000, IsaFeature::Mte, "MTE pointer tag arithmetic"),
+            (0xD503_201F | (0b0100 << 5), IsaFeature::Bti, "BTI hint"),
+            (0x1AC0_4000, IsaFeature::Crc32, "CRC-32"),
+            (0x4E28_4800, IsaFeature::Aes, "AES round"),
+            (0x5E00_4000, IsaFeature::Sha2, "SHA-256"),
+        ];
+
+        for (word, expected, description) in cases {
+            let report = scan_code(&word.to_le_bytes(), 0x1000);
+            assert!(
+                report.features().contains(&expected),
+                "the rule for {description} (word 0x{word:08X}) is unreachable through the \
+                 real entry point; it classifies as {:?}",
+                report.features()
+            );
+        }
+    }
+
+    /// The bug this scanner shipped, pinned so it cannot return.
+    ///
+    /// The removed SME rule matched `(word & 0xE0000000) == 0xC0000000` with a marker field.
+    /// That band covers 3.12% of the entire 32-bit encoding space, and every one of its 121
+    /// hits across the corpus was `0xCCCCCCCC` — the `int3` fill lld writes to align a section.
+    /// The rule had **zero true positives**.
+    ///
+    /// The consequence was not academic. `compitum verify` reported REFUSED for
+    /// `ntcall-arm64.exe`, a real ARM64 Windows program that Wine executes successfully. The
+    /// tool was telling users that a working binary would not work.
+    #[test]
+    fn linker_padding_is_never_classified_as_an_instruction() {
+        // The exact words a linker uses to fill a section's alignment gap.
+        for padding in [0xCCCC_CCCC_u32, 0x0000_0000, 0xFFFF_FFFF, 0x9090_9090] {
+            let report = scan_code(&padding.to_le_bytes(), 0x1000);
+            assert!(
+                report.is_empty(),
+                "padding word 0x{padding:08X} must not be classified as any feature, got {:?}",
+                report.features()
+            );
+            assert_eq!(
+                report.total_hits, 0,
+                "padding must not be counted as evidence"
+            );
+        }
+    }
+
+    /// A run of padding, the shape that actually caused the false refusal.
+    #[test]
+    fn a_padding_filled_section_requires_nothing() {
+        // 128 words of int3 fill, which is what lld emitted at the end of the real binary
+        // that was wrongly refused.
+        let mut code = Vec::new();
+        for _ in 0..128 {
+            code.extend_from_slice(&0xCCCC_CCCCu32.to_le_bytes());
+        }
+        let report = scan_code(&code, 0x1000);
+        assert!(
+            report.is_empty(),
+            "a padding-filled section must raise no requirements, got {:?}",
+            report.features()
+        );
+        assert_eq!(report.total_hits, 0);
+    }
+
+    /// Padding mixed with real code must not hide the real code.
+    #[test]
+    fn padding_does_not_mask_real_instructions() {
+        let mut code = Vec::new();
+        for _ in 0..16 {
+            code.extend_from_slice(&0xCCCC_CCCCu32.to_le_bytes());
+        }
+        code.extend_from_slice(&0x0420_0002u32.to_le_bytes()); // a scalable-vector opcode
+        for _ in 0..16 {
+            code.extend_from_slice(&0xCCCC_CCCCu32.to_le_bytes());
+        }
+
+        let report = scan_code(&code, 0x1000);
+        assert_eq!(
+            report.total_hits, 1,
+            "exactly one real instruction is present, so exactly one hit is expected"
+        );
+        assert!(report.features().contains(&IsaFeature::Sve));
+    }
+
+    /// Every remaining rule must have a positive rate above chance on a real binary.
+    ///
+    /// A rule that matches a large fraction of encoding space while finding nothing real is
+    /// noise, not a heuristic. This bounds the risk: it checks that no single rule fires on
+    /// padding, which is the cheapest signal that a rule is measuring the fill byte rather
+    /// than an instruction.
+    #[test]
+    fn no_rule_fires_on_padding_alone() {
+        let padding = [0xCCCC_CCCCu32, 0x0000_0000, 0xFFFF_FFFF, 0x9090_9090];
+        for word in padding {
+            for mode in [word, !word, word ^ 0x5555_5555] {
+                let report = scan_code(&mode.to_le_bytes(), 0);
+                assert_eq!(
+                    report.total_hits, 0,
+                    "word 0x{mode:08X} derived from padding 0x{word:08X} was classified"
+                );
+            }
+        }
     }
 
     #[test]
