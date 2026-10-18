@@ -49,6 +49,13 @@ jobs:
     name: can the runner's Wine run ARM64EC?
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
+    env:
+      # Disable Mono and Gecko. A prefix initialisation otherwise tries to DOWNLOAD both
+      # from the internet, which is what hung this job for 30 minutes on work that should
+      # take two. Neither is needed to execute a native or ARM64EC binary.
+      WINEDLLOVERRIDES: "mscoree,mshtml="
+      # Silence Wine's own chatter so the diagnostic output stays readable.
+      WINEDEBUG: "-all"
 
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +168,15 @@ jobs:
             PREFIX="/tmp/wp-try-$(basename "$CANDIDATE")"
             rm -rf "$PREFIX"; mkdir -p "$PREFIX"
             export WINEPREFIX="$PREFIX"
+
+            # The raw loader at /usr/lib/wine/wine64 is not a wrapper: it does not know
+            # where its own DLLs live, so it needs telling. Without these it exits
+            # immediately, which reads as "cannot execute" and is not that.
+            if [ "$CANDIDATE" = "/usr/lib/wine/wine64" ]; then
+              export WINELOADER="$CANDIDATE"
+              export WINEDLLPATH="/usr/lib/aarch64-linux-gnu/wine:/usr/lib/wine"
+              echo "    (set WINELOADER and WINEDLLPATH for the raw loader)"
+            fi
             # WINEDEBUG is deliberately NOT suppressed here: silent output is what made the
             # previous failure unreadable.
             export WINEDEBUG=fixme-all,err+all
@@ -211,7 +227,9 @@ jobs:
           # environment is wrong and no conclusion about ARM64EC can be drawn from this run.
           export WINEPREFIX=/tmp/wp-final WINEDEBUG=-all
           rm -rf "$WINEPREFIX"
-          "$WINE_BIN" wineboot -i >/dev/null 2>&1 || true
+          # Bounded, for the same reason as the diagnostic's: an unbounded wineboot once
+          # consumed 30 minutes of this job's budget trying to fetch Mono and Gecko.
+          WINEDLLOVERRIDES="mscoree,mshtml=" timeout 60 "$WINE_BIN" wineboot -i >/dev/null 2>&1 || true
           "$WINE_BIN" wineserver -k >/dev/null 2>&1 || true
           sleep 2
 
