@@ -148,6 +148,28 @@ jobs:
             exit 0
           fi
 
+          if [ "$CODE" = "3" ]; then
+            # The instrument failed, not the binary. This must never be reported as
+            # "ARM64EC does not execute", because that conclusion was not reached -- and
+            # translating it into "build Wine from source" would commit hours of work to
+            # justify a claim nothing measured.
+            {
+              echo "### The probe could not measure anything"
+              echo
+              echo "\`$WINELINE\`"
+              echo
+              echo "CPU time was unreadable, so neither a positive nor a negative result was"
+              echo "obtained. This says nothing about ARM64EC."
+              echo
+              echo "**Do not start a build on the strength of this run.** First establish why"
+              echo "CPU time cannot be read on this runner -- \`/proc\` may be unavailable, or"
+              echo "the process tree may not be visible from inside the job."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::error::the probe could not measure CPU time; no ARM64EC verdict was reached"
+            exit 1
+          fi
+
           # Anything else means ARM64EC did not execute. That is the evidence that justifies
           # building Wine from source -- a real result, not a workflow failure.
           {

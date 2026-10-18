@@ -3,8 +3,19 @@
 #
 # Usage:  sh tools/probe-arm64ec.sh <corpus-dir>
 #
-# Exit 0 means ARM64EC executed; exit 1 means it did not, and the caller should read that as
-# "a build is required" rather than as a defect in the workflow.
+# Exit codes, and the distinction between the last two is the point:
+#
+#   0  ARM64EC executed
+#   1  it did not, and the caller should read that as "a build is required" rather than as a
+#      defect in the workflow
+#   3  NOTHING WAS MEASURED -- the instrument could not read CPU time, so neither a positive
+#      nor a negative result was obtained. A caller must never translate this into "it does
+#      not work", because that is a finding the run did not produce.
+#
+# Exit 3 was added after it happened: on the CI runner both CPU samples read 0/0, the probe
+# reported "the binary did not execute", and the workflow turned that into "Wine must be built
+# from source". Hours of work were about to be justified by an instrument that had observed
+# nothing.
 #
 # # Why this measurement is not just an exit code any more
 #
@@ -63,6 +74,14 @@
 
 set -u
 
+# NOT `set -e`, deliberately. Every decision in this script is made from an explicit exit
+# status, and a status capture is impossible under errexit. Turning errexit on anywhere --
+# including from inside a function, which is how it leaked here once -- silently converts a
+# three-state return code into a four-state one, the fourth being the shell's own.
+#
+# `set -u` stays: an unset variable is a mistake in a script whose whole job is to report
+# precisely, and failing loudly on one is the desired behaviour.
+
 CORPUS="${1:-/tmp/corpus}"
 SAMPLE="$CORPUS/real-console-4k.exe"
 ARM64EC="$CORPUS/chpe-arm64ec.exe"
@@ -94,14 +113,45 @@ warm_up() {
     sleep 1
 }
 
+# Reads /proc and reports how many process entries were readable.
+#
+# This exists because "the tree consumed no CPU" and "the tree could not be read" are
+# different answers, and an earlier version of this script collapsed them. On the CI runner
+# both samples came back 0/0 and the probe concluded "the binary did not execute" -- a
+# conclusion drawn from an instrument that had reported nothing at all.
+readable_entries() {
+    count=0
+    for entry in /proc/[0-9]*; do
+        [ -r "$entry/stat" ] && count=$((count + 1))
+    done
+    echo "$count"
+}
+
 # Sums the CPU ticks of a pid and every descendant.
 #
 # The process name in /proc/<pid>/stat is parenthesised and MAY CONTAIN SPACES, so fields are
 # counted from after the final ')' rather than by splitting the whole line. Splitting naively
 # reads the wrong field for any process whose name contains a space, and the resulting error
 # is silent -- it yields a plausible number.
+#
+# Prints the total, or NOTHING when the measurement could not be made. Printing an empty string
+# rather than 0 is deliberate, because there are two ways to learn nothing and both produce a
+# zero that looks like an answer:
+#
+#   * /proc could not be read at all, and
+#   * the process we meant to watch was not visible in it.
+#
+# The second is what happened on the CI runner: every sample read 0, the probe reported "the
+# binary did not execute", and the workflow nearly turned that into hours of building Wine.
+# A zero is only an answer when the thing being watched was actually there to be read.
 tree_ticks() {
     root="$1"
+    if [ "$(readable_entries)" -eq 0 ]; then
+        return 0   # nothing printed -> /proc unreadable
+    fi
+    if [ ! -r "/proc/$root/stat" ]; then
+        return 0   # nothing printed -> the watched process is not visible
+    fi
     for entry in /proc/[0-9]*; do
         [ -r "$entry/stat" ] || continue
         rest=$(sed 's/.*) //' "$entry/stat" 2>/dev/null) || continue
@@ -111,6 +161,12 @@ tree_ticks() {
         { pid[NR] = $1; parent[NR] = $2; ticks[NR] = $3; count = NR }
         END {
             inside[root] = 1
+            found_root = 0
+            for (i = 1; i <= count; i++)
+                if (pid[i] == root) found_root = 1
+            # The root itself must be in the table, or there is nothing to attribute to it and
+            # a sum of zero would be meaningless rather than informative.
+            if (!found_root) exit
             # Fixed-point closure rather than recursion: the table is unordered, so a child
             # can appear before its parent and a single pass would miss it.
             for (pass = 0; pass < 16; pass++)
@@ -126,20 +182,26 @@ tree_ticks() {
 
 # Runs a fixture and reports whether it EXECUTED.
 #
-# Returns 0 only when the deadline fired AND the process tree consumed CPU above the
-# threshold after start-up settled. Prints the evidence either way, so a disagreement with
-# the verdict can be argued with rather than merely disbelieved.
+# Return codes, and the distinction between them is the whole point:
+#
+#   0  it executed   -- the deadline fired AND the tree sustained CPU growth
+#   1  it did not    -- it exited on its own, or the deadline fired with no CPU growth
+#   2  unmeasurable  -- /proc could not be read, so nothing was observed either way
+#
+# 2 exists because an earlier version returned 1 for that case. On the CI runner both samples
+# read 0/0, the probe reported "the binary did not execute", and the workflow turned that into
+# "Wine must be built from source" -- hours of work, decided by an instrument that had observed
+# nothing. An unmeasurable run must never be reported as a negative result.
 #
 # # Warm-up is a precondition, not a nicety
 #
 # On a FRESH Wine prefix, the very first execution spends its entire allowance initialising
 # the prefix: it returns 124 with a tree total of about 3 ticks, because the fixture never
-# reaches its loop. The strengthened probe then refuses to call that execution -- correctly,
+# reaches its loop. The strengthened criterion then refuses to call that execution -- correctly,
 # since a file that cannot load looks identical -- but the refusal says nothing about the
-# binary.
-#
-# `tools/measure-cpu-signal.sh` already established this: every measurement there is preceded
-# by `wineboot` AND a throwaway run. So `warm_up` does the same before anything is judged.
+# binary. `tools/measure-cpu-signal.sh` already established this: every measurement there is
+# preceded by `wineboot` AND a throwaway run. So `warm_up` does the same before anything is
+# judged.
 executes() {
     binary="$1"
     label="$2"
@@ -152,10 +214,17 @@ executes() {
     # reports zero. An earlier version sampled at exactly the deadline and every reading came
     # back 0 -- a zero indistinguishable from a subject that did nothing, which is precisely
     # the failure this probe exists to catch. The margin costs three seconds.
-    set +e
+    #
+    # NOTE: this script runs with `set -u` and deliberately NOT with `set -e`. An earlier
+    # version had `set +e` / `set -e` pairs bracketing each status capture, and because a
+    # POSIX function is not a subshell, that `set -e` leaked out of the function and applied
+    # to the rest of the script. The result: the bare `executes "$SAMPLE" "control"` call
+    # returning 2 aborted the whole probe with status 2, before `probe_code=$?` was ever
+    # evaluated -- so the three-state design was defeated by an invisible setting, and the
+    # caller received an exit code the script never documents. A status capture needs no
+    # errexit toggling when errexit is off to begin with.
     timeout $((RUN_SECONDS + 3)) "$WINE_BIN" "$binary" </dev/null >/tmp/run.log 2>&1 &
     run_pid=$!
-    set -e
 
     sleep "$tail_at"
     baseline=$(tree_ticks "$run_pid")
@@ -163,16 +232,41 @@ executes() {
     sleep $((RUN_SECONDS - tail_at))
     peak=$(tree_ticks "$run_pid")
 
-    set +e
     wait "$run_pid" 2>/dev/null
     rc=$?
-    set -e
 
     # Stop the daemon, which would otherwise outlive its trial.
     timeout 20 "$WINE_BIN" wineserver -k </dev/null >/dev/null 2>&1 || true
     sleep 1
 
     window=$((RUN_SECONDS - tail_at))
+
+    echo "    $label raw exit code : $rc   (124 = the deadline fired)"
+
+    # ORDER MATTERS HERE, and the first version of this got it wrong.
+    #
+    # A process that exits quickly cannot be sampled afterwards: its /proc entry is gone, so
+    # the reading comes back empty. That is indistinguishable from "/proc is broken" unless the
+    # exit code is consulted first -- and it carries a conclusive answer already. The negative
+    # control exits 47, was then reported as "could not measure", and the probe halted on a
+    # control that had in fact behaved perfectly.
+    #
+    # So: an exit code other than 124 settles the question without any CPU evidence, and only a
+    # timeout depends on it.
+    if [ "$rc" -ne 124 ]; then
+        echo "    ==> EXITED on its own, so it did not load"
+        return 1
+    fi
+
+    # The deadline fired, so the process was alive at the end and the CPU reading is required.
+    # An empty reading here means the instrument failed, not that the binary did nothing.
+    if [ -z "$baseline" ] || [ -z "$peak" ]; then
+        echo "    $label tree CPU      : UNREADABLE (the watched process was not visible in /proc)"
+        echo "    ==> COULD NOT MEASURE: nothing is known about this binary from this run."
+        echo "        This is a limitation of the host, not a negative result."
+        return 2
+    fi
+
     growth=$((peak - baseline))
     [ "$growth" -lt 0 ] && growth=0
 
@@ -185,14 +279,9 @@ executes() {
     required=$((MIN_TICKS_PER_SECOND * window))
     rate=$((growth / window))
 
-    echo "    $label raw exit code : $rc   (124 = the deadline fired)"
     echo "    $label tree CPU      : baseline=$baseline peak=$peak growth=$growth ticks"
     echo "    $label sustained     : $rate ticks/s (threshold $MIN_TICKS_PER_SECOND, needs $required ticks in ${window}s)"
 
-    if [ "$rc" -ne 124 ]; then
-        echo "    ==> EXITED on its own, so it did not load"
-        return 1
-    fi
     if [ "$growth" -lt "$required" ]; then
         echo "    ==> TIMED OUT WITHOUT CONSUMING CPU: still starting or blocked, not executing."
         echo "        A file that cannot be loaded at all produces the same reading, so this"
@@ -216,6 +305,7 @@ executes() {
 # cannot even confirm a known-good binary has no standing to judge a hard one.
 # ---------------------------------------------------------------------------
 WINE_BIN=""
+UNMEASURABLE=0
 for candidate in /usr/bin/wine64 /usr/bin/wine /usr/lib/wine/wine64; do
     [ -x "$candidate" ] || continue
 
@@ -242,17 +332,44 @@ for candidate in /usr/bin/wine64 /usr/bin/wine /usr/lib/wine/wine64; do
     warm_up "$SAMPLE"
 
     echo "    control (plain ARM64, known to execute):"
-    if executes "$SAMPLE" "control"; then
-        echo "    ==> WORKS"
-        echo
-        break
-    fi
-    echo "    ==> cannot execute a plain ARM64 binary"
+    executes "$SAMPLE" "control"
+    probe_code=$?
+    case "$probe_code" in
+        0)
+            echo "    ==> WORKS"
+            echo
+            break
+            ;;
+        1)
+            echo "    ==> cannot execute a plain ARM64 binary"
+            ;;
+        *)
+            # The instrument failed, not the binary. Recording this separately matters: the
+            # candidate is neither accepted nor rejected, and the final verdict must say that
+            # nothing was measured rather than that ARM64EC does not work.
+            #
+            # The exit is taken HERE rather than deferred to the end of the loop, because an
+            # earlier version deferred it and the script exited 2 instead -- `set -u` tripped on
+            # a later reference before reaching the intended `exit 3`. An explicit exit at the
+            # point of discovery cannot be derailed by anything downstream.
+            echo "    ==> COULD NOT MEASURE with this entry point"
+            UNMEASURABLE=1
+            ;;
+    esac
+    [ "$UNMEASURABLE" -eq 1 ] && continue
     WINE_BIN=""
 done
 
 if [ -z "$WINE_BIN" ]; then
     echo
+    if [ "$UNMEASURABLE" -eq 1 ]; then
+        echo "VERDICT: the control could not be MEASURED here, so nothing was learned."
+        echo "  CPU time was unreadable, which is a limitation of the instrument, not a"
+        echo "  result about ARM64EC. Reporting 'does not execute' from this run would be"
+        echo "  inventing a finding, so the probe reports that it could not tell."
+        echo "  Exit 3 means exactly that and is distinct from exit 1."
+        exit 3
+    fi
     echo "VERDICT: no Wine entry point here can execute a plain ARM64 binary."
     echo "That is an environment result, not an ARM64EC verdict, and it means the"
     echo "measurement below cannot be trusted either way."
@@ -287,7 +404,16 @@ rm -rf "$WINEPREFIX"; mkdir -p "$WINEPREFIX"
 warm_up "$SAMPLE"
 
 echo "control   (plain ARM64)   :"
-if ! executes "$SAMPLE" "control"; then
+executes "$SAMPLE" "control"
+control_code=$?
+if [ "$control_code" -eq 2 ]; then
+    echo
+    echo "VERDICT: the control could not be MEASURED, so nothing was learned."
+    echo "  CPU time was unreadable in the tail window. That is a limitation of the"
+    echo "  instrument; treating it as 'the binary did not run' would invent a finding."
+    exit 3
+fi
+if [ "$control_code" -ne 0 ]; then
     echo "VERDICT: the control did not execute, so ARM64EC cannot be judged from this run."
     exit 1
 fi
@@ -301,21 +427,44 @@ printf 'MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00' > "$NEGATIVE
 
 echo
 echo "negative  (MZ only, not a PE image):"
-if executes "$NEGATIVE" "negative"; then
-    echo
-    echo "VERDICT: the criterion is BROKEN -- it accepted a file Wine cannot execute."
-    echo "  Nothing below would have been meaningful, so the run stops here."
-    echo "  Expected: an exit other than 124, or 124 with no sustained CPU growth."
-    exit 1
-fi
-echo "          negative control REJECTED, as it must be"
+executes "$NEGATIVE" "negative"
+negative_code=$?
+case "$negative_code" in
+    0)
+        echo
+        echo "VERDICT: the criterion is BROKEN -- it accepted a file Wine cannot execute."
+        echo "  Nothing below would have been meaningful, so the run stops here."
+        echo "  Expected: an exit other than 124, or 124 with no sustained CPU growth."
+        exit 1
+        ;;
+    2)
+        # The negative control must be REJECTED. Failing to measure it is not a rejection:
+        # it leaves the criterion unvalidated, so the subject's result would have no standing.
+        echo
+        echo "VERDICT: the negative control could not be measured, so the criterion is"
+        echo "  unvalidated and the subject is not judged. An instrument that cannot see"
+        echo "  the control cannot be trusted with the subject."
+        exit 3
+        ;;
+    *)
+        echo "          negative control REJECTED, as it must be"
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Step 3: the actual question.
 # ---------------------------------------------------------------------------
 echo
 echo "subject   (ARM64EC)       :"
-if executes "$ARM64EC" "subject"; then
+executes "$ARM64EC" "subject"
+subject_code=$?
+if [ "$subject_code" -eq 2 ]; then
+    echo
+    echo "VERDICT: the subject could not be MEASURED, so nothing was learned about it."
+    echo "  This is NOT a negative result and must not be read as one."
+    exit 3
+fi
+if [ "$subject_code" -eq 0 ]; then
     echo
     echo "VERDICT: ARM64EC EXECUTES on this machine's Wine."
     echo "  $("$WINE_BIN" --version 2>&1 | head -1)"
