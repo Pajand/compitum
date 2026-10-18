@@ -121,31 +121,108 @@ jobs:
           cargo build --release --all-targets
           ./target/release/compitum --version
 
-      - name: Prove the toolchain before measuring
+      - name: Diagnose which Wine entry point can execute a program
+        id: diagnose
+        run: |
+          # The previous attempt reported +0 jiffies with EMPTY stderr, which says nothing
+          # about why. This step is deliberately a *diagnostic*: it tries each candidate,
+          # keeps full stderr, and prints a verdict. Guessing here costs hours.
+          mkdir -p /tmp/corpus-ci
+          cp crates/compitum-pe/tests/corpus/*.exe /tmp/corpus-ci/
+          SAMPLE=/tmp/corpus-ci/real-console-4k.exe
+          echo "sample: $SAMPLE  ($(stat -c%s "$SAMPLE") bytes, plain ARM64, proven to run)"
+
+          cpu_growth() {   # $1 = process-name fragment; prints jiffies after 4 s
+            local name="$1" first=0 second=0 p cmd stat rest
+            sleep 4
+            for p in /proc/[0-9]*; do
+              cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+              case "$cmd" in *"$name"*) stat=$(cat "$p/stat" 2>/dev/null) || continue
+                rest=${stat#*) }; set -- $rest
+                first=$(( first + ${12:-0} + ${13:-0} )) ;; esac
+            done
+            sleep 4
+            for p in /proc/[0-9]*; do
+              cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+              case "$cmd" in *"$name"*) stat=$(cat "$p/stat" 2>/dev/null) || continue
+                rest=${stat#*) }; set -- $rest
+                second=$(( second + ${12:-0} + ${13:-0} )) ;; esac
+            done
+            echo $(( second - first ))
+          }
+
+          WINNER=""
+          WORKER=""
+          for CANDIDATE in /usr/bin/wine64 /usr/bin/wine /usr/lib/wine/wine64; do
+            [ -x "$CANDIDATE" ] || continue
+            echo
+            echo "=== $CANDIDATE ==="
+
+            PREFIX="/tmp/wp-try-$(basename "$CANDIDATE")"
+            rm -rf "$PREFIX"; mkdir -p "$PREFIX"
+            export WINEPREFIX="$PREFIX"
+            # WINEDEBUG is deliberately NOT suppressed here: silent output is what made the
+            # previous failure unreadable.
+            export WINEDEBUG=fixme-all,err+all
+
+            echo "--- version ---"
+            set +e; "$CANDIDATE" --version 2>&1 | head -2; set -e
+
+            echo "--- wineboot (initialise the prefix) ---"
+            set +e; timeout 90 "$CANDIDATE" wineboot -i >/tmp/boot.log 2>&1; bc=$?; set -e
+            echo "    exit $bc"
+            grep -iE "wine32|error|cannot|missing" /tmp/boot.log | head -4 | sed 's/^/    /'
+
+            echo "--- executing the sample ---"
+            set +e
+            "$CANDIDATE" "$SAMPLE" >/tmp/run.log 2>&1 &
+            set -e
+            growth=$(cpu_growth "real-console-4k")
+            echo "    CPU growth: +$growth jiffies in 4 s"
+            head -6 /tmp/run.log | sed 's/^/    /'
+            "$CANDIDATE" wineserver -k >/dev/null 2>&1 || true
+            pkill -f real-console 2>/dev/null || true
+            sleep 1
+
+            if [ "$growth" -ge 150 ]; then
+              echo "    ==> WORKS"
+              [ -z "$WINNER" ] && WINNER="$CANDIDATE"
+              WORKER="$CANDIDATE"
+              break
+            fi
+            echo "    ==> cannot execute"
+          done
+
+          if [ -n "$WINNER" ]; then
+            echo "WINE_BIN=$WINNER" >> "$GITHUB_ENV"
+            echo "usable Wine: $WINNER"
+            echo "usable=$WINNER" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::no Wine entry point on this runner could execute a plain ARM64 binary"
+            echo "This is an environment result, not an ARM64EC verdict."
+            echo "usable=" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Confirm the toolchain can execute ARM64 before judging ARM64EC
         run: |
           # A known-good case first. `real-console-4k.exe` is plain ARM64 and was already
           # proven to execute under Wine 6.0.3 during Phase 1. If it does not run here, the
-          # environment is wrong and no conclusion about ARM64EC can be drawn.
-          export WINEPREFIX=/tmp/wp-probe
-          export WINEDEBUG=-all
-          mkdir -p /tmp/corpus-ci
-          cp crates/compitum-pe/tests/corpus/*.exe /tmp/corpus-ci/
-
-          echo "--- wineboot ---"
+          # environment is wrong and no conclusion about ARM64EC can be drawn from this run.
+          export WINEPREFIX=/tmp/wp-final WINEDEBUG=-all
+          rm -rf "$WINEPREFIX"
           "$WINE_BIN" wineboot -i >/dev/null 2>&1 || true
           "$WINE_BIN" wineserver -k >/dev/null 2>&1 || true
           sleep 2
 
-          echo "--- control: plain ARM64, previously proven to run ---"
-          "$WINE_BIN" /tmp/corpus-ci/real-console-4k.exe >/tmp/ctrl.log 2>&1 &
-          sleep 4
-          a=0; b=0
+          "$WINE_BIN" /tmp/corpus-ci/real-console-4k.exe >/dev/null 2>&1 &
+          sleep 4; a=0
           for p in /proc/[0-9]*; do
             cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
             case "$cmd" in *real-console-4k*) st=$(cat "$p/stat" 2>/dev/null) || continue
               rest=${st#*) }; set -- $rest; a=$(( a + ${12:-0} + ${13:-0} )) ;; esac
           done
-          sleep 4
+          sleep 4; b=0
           for p in /proc/[0-9]*; do
             cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
             case "$cmd" in *real-console-4k*) st=$(cat "$p/stat" 2>/dev/null) || continue
@@ -153,16 +230,13 @@ jobs:
           done
           "$WINE_BIN" wineserver -k >/dev/null 2>&1 || true
           pkill -f real-console 2>/dev/null || true
-          echo "  CPU growth: +$((b - a)) jiffies in 4 s"
-          echo "  wine stderr:"
-          head -6 /tmp/ctrl.log | sed 's/^/    /'
 
+          echo "  CPU growth: +$((b - a)) jiffies in 4 s"
           if [ $((b - a)) -lt 150 ]; then
-            echo "::error::the control case did not execute, so ARM64EC cannot be judged from this run"
-            echo "This is an environment problem, not an ARM64EC result."
+            echo "::error::the control did not execute; ARM64EC cannot be judged from this run"
             exit 1
           fi
-          echo "control passed: the environment can execute ARM64"
+          echo "control passed: this environment executes ARM64"
 
       - name: Run the prediction-versus-observation check
         id: loopcheck
