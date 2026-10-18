@@ -52,6 +52,7 @@ dependencies = [
 name = "compitum-pe"
 version = "0.1.0"
 dependencies = [
+ "compitum-digest",
  "compitum-isa",
  "compitum-json",
 ]

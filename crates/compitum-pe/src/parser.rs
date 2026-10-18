@@ -609,37 +609,78 @@ fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeade
         other => return Err(PeError::UnknownOptionalHeader { magic: other }),
     };
 
-    let linker_major = crate::reader::u8_at(data, offset + 2)?;
-    let linker_minor = crate::reader::u8_at(data, offset + 3)?;
-    let os_major = u16_at(data, offset + 40)?;
-    let os_minor = u16_at(data, offset + 42)?;
+    // Field offsets within the optional header, numbered exactly as the PE specification
+    // numbers them from the start of that header.
+    //
+    // These are named constants rather than arithmetic chained from a running anchor,
+    // because an earlier revision did the latter and was wrong. On a real
+    // compiler-produced binary it read `Subsystem` as 4096 instead of 3, and read the data
+    // directory from the middle of unrelated fields. The chained arithmetic looked
+    // plausible and produced a self-consistent answer -- which is precisely why synthetic
+    // fixtures never caught it: the fixture builder used the *same* wrong anchor, so the
+    // writer and the reader agreed with each other while both disagreed with reality. Only
+    // a binary from a real toolchain exposed it.
+    //
+    // Named offsets can be checked against the specification by reading them, which is the
+    // only defence that scales.
+    //
+    // Layout fact that the earlier revision got wrong: everything up to and including
+    // `DllCharacteristics` sits at the *same* offset in both PE32 and PE32+. The layouts
+    // diverge only at `SizeOfStackReserve` (0x48), which is 64-bit in PE32+ and pushes the
+    // remaining fields eight bytes later. So only `NumberOfRvaAndSizes` and the data
+    // directory need a per-layout position -- not the subsystem, and not the image size.
+    //
+    // Verified field by field against a real PE32+ image produced by clang and lld-link
+    // and cross-checked with `llvm-readobj`:
+    //
+    //   0x00 Magic = 0x20B                 0x20 SectionAlignment = 0x1000
+    //   0x18 ImageBase = 0x140000000       0x38 SizeOfImage = 0x2000
+    //   0x3C SizeOfHeaders = 0x200         0x44 Subsystem = 3 (console)
+    //   0x46 DllCharacteristics = 0x8160   0x6C NumberOfRvaAndSizes = 16
+    const OFF_LINKER_MAJOR: usize = 0x02;
+    const OFF_LINKER_MINOR: usize = 0x03;
+    const OFF_OS_MAJOR: usize = 0x28;
+    const OFF_OS_MINOR: usize = 0x2A;
+    const OFF_IMAGE_BASE_PE32: usize = 0x1C;
+    const OFF_IMAGE_BASE_PE32PLUS: usize = 0x18;
+    const OFF_SECTION_ALIGNMENT: usize = 0x20;
+    const OFF_FILE_ALIGNMENT: usize = 0x24;
+    const OFF_SIZE_OF_IMAGE: usize = 0x38;
+    const OFF_SIZE_OF_HEADERS: usize = 0x3C;
+    const OFF_SUBSYSTEM: usize = 0x44;
+    const OFF_DLL_CHARACTERISTICS: usize = 0x46;
+    const OFF_RVA_AND_SIZES_PE32: usize = 0x5C;
+    const OFF_RVA_AND_SIZES_PE32PLUS: usize = 0x6C;
 
-    // The two layouts diverge before this point: PE32 stores ImageBase as u32 at 0x1C
-    // and BaseOfData follows it; PE32+ stores ImageBase as u64 at 0x18 and has no
-    // BaseOfData field. Every subsequent field shifts by 8 bytes in PE32+.
-    let (image_base, section_alignment_offset, shift) = if is_plus {
-        (u64_at(data, offset + 24)?, offset + 32, 0usize)
+    let linker_major = crate::reader::u8_at(data, offset + OFF_LINKER_MAJOR)?;
+    let linker_minor = crate::reader::u8_at(data, offset + OFF_LINKER_MINOR)?;
+    let os_major = u16_at(data, offset + OFF_OS_MAJOR)?;
+    let os_minor = u16_at(data, offset + OFF_OS_MINOR)?;
+
+    // PE32 stores `ImageBase` as a 32-bit field at 0x1C, preceded by `BaseOfData` at 0x18.
+    // PE32+ widens it to 64 bits at 0x18 and drops `BaseOfData`. This is the first and only
+    // genuine divergence in the header prefix.
+    let image_base = if is_plus {
+        u64_at(data, offset + OFF_IMAGE_BASE_PE32PLUS)?
     } else {
-        (u64::from(u32_at(data, offset + 28)?), offset + 32, 0usize)
+        u64::from(u32_at(data, offset + OFF_IMAGE_BASE_PE32)?)
     };
 
-    let section_alignment = u32_at(data, section_alignment_offset)?;
-    let file_alignment = u32_at(data, section_alignment_offset + 4)?;
+    let section_alignment = u32_at(data, offset + OFF_SECTION_ALIGNMENT)?;
+    let file_alignment = u32_at(data, offset + OFF_FILE_ALIGNMENT)?;
+    let size_of_image = u32_at(data, offset + OFF_SIZE_OF_IMAGE)?;
+    let size_of_headers = u32_at(data, offset + OFF_SIZE_OF_HEADERS)?;
+    let subsystem = Subsystem(u16_at(data, offset + OFF_SUBSYSTEM)?);
+    let dll_characteristics = u16_at(data, offset + OFF_DLL_CHARACTERISTICS)?;
 
-    // WindowsLoaderSize/ImageSize and the header sizes sit at a fixed shift after the
-    // alignment pair.
-    let size_of_image = u32_at(data, section_alignment_offset + 24 + shift)?;
-    let size_of_headers = u32_at(data, section_alignment_offset + 28 + shift)?;
-
-    // The subsystem lives at 0x44 in PE32 and 0x44 in PE32+ as well when measured from
-    // the section-alignment anchor; derive it from the anchor to avoid two magic
-    // constants that must agree.
-    let subsystem = Subsystem(u16_at(data, section_alignment_offset + 24 + shift + 24)?);
-    let dll_characteristics = u16_at(data, section_alignment_offset + 24 + shift + 26)?;
-
-    // NumberOfRvaAndSizes is the last u32 of the fixed portion; the data directories
-    // begin immediately after it.
-    let data_directory_offset = section_alignment_offset + 24 + shift + 28 + 4;
+    // `NumberOfRvaAndSizes` is the last fixed field, and the data directory begins
+    // immediately after it. Only this position differs between the two layouts.
+    let rva_and_sizes_offset = if is_plus {
+        OFF_RVA_AND_SIZES_PE32PLUS
+    } else {
+        OFF_RVA_AND_SIZES_PE32
+    };
+    let data_directory_offset = offset + rva_and_sizes_offset + 4;
 
     if !crate::reader::is_power_of_two(section_alignment) && section_alignment != 0 {
         return Err(PeError::InvalidField {
@@ -809,20 +850,24 @@ mod tests {
 
     /// Offset of the data-directory array within a PE32+ optional header.
     ///
-    /// Only the fixture builder below needs this: the production parser derives the same
-    /// position by arithmetic from the layout anchor, which is what keeps it correct for
-    /// both PE32 and PE32+ without a second magic number.
-    const DATA_DIRECTORY_OFFSET_PE32PLUS: usize = 88;
-
     /// Builds a syntactically valid PE image with the given machine type and subsystem.
     ///
-    /// The layout follows the specification exactly so the parser is exercised against
-    /// real structure rather than a shortcut. `extra_import` optionally appends an import
-    /// descriptor naming a single module.
+    /// Delegates to the shared [`crate::fixture`] module rather than maintaining a second
+    /// copy of the construction logic. An earlier revision had a private builder here with
+    /// its own hard-coded optional-header offsets, and when those offsets were corrected in
+    /// the parser this copy silently kept the old ones -- four tests failed, and the cause
+    /// was the duplication rather than either implementation.
+    ///
+    /// The deeper lesson is recorded in `fixture.rs`: a fixture that shares an assumption
+    /// with the code under test cannot detect that assumption being wrong. Keeping one
+    /// builder does not solve that, but it does guarantee that a fix lands everywhere at
+    /// once. Detecting the *assumption* needs a binary from a real toolchain, which is what
+    /// `real_toolchain_output_is_parsed_correctly` below provides.
     fn synthetic_pe(machine: u16, subsystem: u16, is_dll: bool) -> Vec<u8> {
-        synthetic_pe_with(machine, subsystem, is_dll, &[], 0x1000)
+        crate::fixture::synthetic(machine, subsystem, is_dll)
     }
 
+    /// Builds an image with an import directory, delegating to the shared builder.
     fn synthetic_pe_with(
         machine: u16,
         subsystem: u16,
@@ -830,84 +875,15 @@ mod tests {
         extra_import: &[&str],
         section_alignment: u32,
     ) -> Vec<u8> {
-        let pe_offset = 0x80usize;
-        let optional_size = 0xF0usize;
-        let section_count = 1usize;
-        let total =
-            pe_offset + 4 + 20 + optional_size + section_count * SECTION_HEADER_SIZE + 0x400;
-
-        let mut data = vec![0u8; total];
-        // DOS header.
-        data[0] = b'M';
-        data[1] = b'Z';
-        data[0x3C..0x40].copy_from_slice(&(pe_offset as u32).to_le_bytes());
-        // PE signature.
-        data[pe_offset..pe_offset + 4].copy_from_slice(&PE_SIGNATURE.to_le_bytes());
-
-        let coff = pe_offset + 4;
-        data[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
-        data[coff + 2..coff + 4].copy_from_slice(&(section_count as u16).to_le_bytes());
-        data[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
-        let mut characteristics = 0x0002u16; // IMAGE_FILE_EXECUTABLE_IMAGE
-        if is_dll {
-            characteristics |= 0x2000;
-        }
-        data[coff + 18..coff + 20].copy_from_slice(&characteristics.to_le_bytes());
-
-        let opt = coff + 20;
-        data[opt..opt + 2].copy_from_slice(&MAGIC_PE32_PLUS.to_le_bytes());
-        data[opt + 2] = 14; // linker major
-        data[opt + 3] = 0;
-        data[opt + 40..opt + 42].copy_from_slice(&10u16.to_le_bytes()); // OS major
-        data[opt + 24..opt + 32].copy_from_slice(&(0x1_4000_0000u64).to_le_bytes()); // ImageBase
-        data[opt + 32..opt + 36].copy_from_slice(&section_alignment.to_le_bytes());
-        data[opt + 36..opt + 40].copy_from_slice(&512u32.to_le_bytes()); // FileAlignment
-                                                                         // SizeOfImage at +32+24 = +56; SizeOfHeaders at +60.
-        data[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes());
-        data[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes());
-        // Subsystem at +32+24+24 = +80; DllCharacteristics at +82.
-        data[opt + 80..opt + 82].copy_from_slice(&subsystem.to_le_bytes());
-        data[opt + 82..opt + 84].copy_from_slice(&0x0160u16.to_le_bytes());
-        // NumberOfRvaAndSizes at +32+24+28 = +84; directories begin at +88.
-        data[opt + 84..opt + 88].copy_from_slice(&16u32.to_le_bytes());
-
-        // Section table.
-        let sect = opt + optional_size;
-        let name = b".text";
-        data[sect..sect + name.len()].copy_from_slice(name);
-        data[sect + 8..sect + 12].copy_from_slice(&0x400u32.to_le_bytes()); // VirtualSize
-        data[sect + 12..sect + 16].copy_from_slice(&section_alignment.to_le_bytes()); // VA
-        data[sect + 16..sect + 20].copy_from_slice(&0x400u32.to_le_bytes()); // SizeOfRawData
-        data[sect + 20..sect + 24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData
-        data[sect + 36..sect + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes()); // code|read
-
-        if !extra_import.is_empty() {
-            // Place an import directory inside the first section, at RVA 0x1000 + 0x100.
-            let import_rva = section_alignment + 0x100;
-            let dir_base =
-                opt + DATA_DIRECTORY_OFFSET_PE32PLUS + DIR_IMPORT * DATA_DIRECTORY_ENTRY_SIZE;
-            data[dir_base..dir_base + 4].copy_from_slice(&import_rva.to_le_bytes());
-            data[dir_base + 4..dir_base + 8]
-                .copy_from_slice(&((extra_import.len() as u32 + 1) * 20).to_le_bytes());
-
-            let import_file = 0x200 + 0x100;
-            // Name strings live after the descriptors.
-            let mut name_cursor = import_file + (extra_import.len() + 1) * 20;
-            for (index, module) in extra_import.iter().enumerate() {
-                let desc = import_file + index * 20;
-                let name_rva = import_rva + (name_cursor - import_file) as u32;
-                data[desc + 12..desc + 16].copy_from_slice(&name_rva.to_le_bytes());
-                // One thunk plus the terminating zero entry.
-                let thunk_rva = name_rva + module.len() as u32 + 4;
-                data[desc + 16..desc + 20].copy_from_slice(&thunk_rva.to_le_bytes());
-                let thunk_file = name_cursor + module.len() + 4;
-                data[thunk_file..thunk_file + 8].copy_from_slice(&0x1234u64.to_le_bytes());
-                data[thunk_file + 8..thunk_file + 16].copy_from_slice(&0u64.to_le_bytes());
-                data[name_cursor..name_cursor + module.len()].copy_from_slice(module.as_bytes());
-                name_cursor += module.len() + 1;
-            }
-        }
-        data
+        crate::fixture::synthetic_advanced(
+            machine,
+            subsystem,
+            is_dll,
+            extra_import,
+            section_alignment,
+            false,
+            0,
+        )
     }
 
     #[test]

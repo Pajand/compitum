@@ -135,27 +135,52 @@ pub fn synthetic_advanced(
                        // SizeOfCode at +4, SizeOfInitializedData at +8: left zero, not load-bearing here.
                        // AddressOfEntryPoint at +16: zero, which is valid for a DLL.
                        // BaseOfCode at +20: zero.
-    data[opt + 24..opt + 32].copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes()); // ImageBase
-    data[opt + 32..opt + 36].copy_from_slice(&section_alignment.to_le_bytes());
-    data[opt + 36..opt + 40].copy_from_slice(&512u32.to_le_bytes()); // FileAlignment
-    data[opt + 40..opt + 42].copy_from_slice(&10u16.to_le_bytes()); // MajorOperatingSystemVersion
-    data[opt + 42..opt + 44].copy_from_slice(&0u16.to_le_bytes()); // MinorOperatingSystemVersion
-    data[opt + 48..opt + 50].copy_from_slice(&10u16.to_le_bytes()); // MajorSubsystemVersion
-                                                                    // Win32VersionValue at +52: zero.
-    data[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes()); // SizeOfImage
-    data[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfHeaders
-    data[opt + 68..opt + 70].copy_from_slice(&3u16.to_le_bytes()); // MajorSubsystemVersion
-    data[opt + 80..opt + 82].copy_from_slice(&subsystem.to_le_bytes());
-    data[opt + 82..opt + 84].copy_from_slice(&0x0160u16.to_le_bytes()); // DllCharacteristics
-    data[opt + 84..opt + 88].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+                       // Field offsets per the PE specification, numbered from the start of the optional
+                       // header.
+                       //
+                       // Every value below is a documented field position rather than arithmetic chained from
+                       // a running anchor. The previous revision chained from `SectionAlignment` and had
+                       // drifted eight bytes by the time it reached `Subsystem`, writing `40` where a real
+                       // toolchain writes the subsystem constant. Because the *parser* chained from the same
+                       // anchor, writer and reader agreed with each other while both disagreed with reality --
+                       // which is why the test suite passed and a real compiler-produced binary was read
+                       // incorrectly. Only a binary from a third-party toolchain could expose it.
+    const OFF_OS_MAJOR: usize = 0x28;
+    const OFF_OS_MINOR: usize = 0x2A;
+    const OFF_SUBSYSTEM_MAJOR: usize = 0x30;
+    const OFF_SIZE_OF_IMAGE: usize = 0x38;
+    const OFF_SIZE_OF_HEADERS: usize = 0x3C;
+    const OFF_SUBSYSTEM: usize = 0x44;
+    const OFF_DLL_CHARACTERISTICS: usize = 0x46;
+    const OFF_RVA_AND_SIZES_PE32PLUS: usize = 0x6C;
+    const OFF_DATA_DIRECTORY: usize = 0x70;
 
-    // Data directories begin at opt + 88; each entry is 8 bytes (RVA, size).
+    data[opt + 0x18..opt + 0x20].copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes()); // ImageBase
+    data[opt + 0x20..opt + 0x24].copy_from_slice(&section_alignment.to_le_bytes());
+    data[opt + 0x24..opt + 0x28].copy_from_slice(&512u32.to_le_bytes()); // FileAlignment
+    data[opt + OFF_OS_MAJOR..opt + OFF_OS_MAJOR + 2].copy_from_slice(&10u16.to_le_bytes());
+    data[opt + OFF_OS_MINOR..opt + OFF_OS_MINOR + 2].copy_from_slice(&0u16.to_le_bytes());
+    data[opt + OFF_SUBSYSTEM_MAJOR..opt + OFF_SUBSYSTEM_MAJOR + 2]
+        .copy_from_slice(&10u16.to_le_bytes());
+    data[opt + OFF_SIZE_OF_IMAGE..opt + OFF_SIZE_OF_IMAGE + 4]
+        .copy_from_slice(&0x2000u32.to_le_bytes());
+    data[opt + OFF_SIZE_OF_HEADERS..opt + OFF_SIZE_OF_HEADERS + 4]
+        .copy_from_slice(&0x200u32.to_le_bytes());
+    data[opt + OFF_SUBSYSTEM..opt + OFF_SUBSYSTEM + 2].copy_from_slice(&subsystem.to_le_bytes());
+    // IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE | NX_COMPAT | DYNAMIC_BASE, which is
+    // what a real linker emits by default.
+    data[opt + OFF_DLL_CHARACTERISTICS..opt + OFF_DLL_CHARACTERISTICS + 2]
+        .copy_from_slice(&0x8160u16.to_le_bytes());
+    data[opt + OFF_RVA_AND_SIZES_PE32PLUS..opt + OFF_RVA_AND_SIZES_PE32PLUS + 4]
+        .copy_from_slice(&16u32.to_le_bytes());
+
+    // Data directories begin at opt + 0x70; each entry is 8 bytes (RVA, size).
     const DIR_IMPORT: usize = 1;
     const DIR_LOAD_CONFIG: usize = 10;
     const DIR_CLR: usize = 14;
 
     if managed {
-        let dir = opt + 88 + DIR_CLR * 8;
+        let dir = opt + OFF_DATA_DIRECTORY + DIR_CLR * 8;
         data[dir..dir + 4].copy_from_slice(&0x1100u32.to_le_bytes());
         data[dir + 4..dir + 8].copy_from_slice(&72u32.to_le_bytes());
     }
@@ -163,7 +188,7 @@ pub fn synthetic_advanced(
     if !imports.is_empty() {
         let import_rva = section_alignment + 0x100;
         let descriptor_bytes = (imports.len() + 1) * 20;
-        let dir = opt + 88 + DIR_IMPORT * 8;
+        let dir = opt + OFF_DATA_DIRECTORY + DIR_IMPORT * 8;
         data[dir..dir + 4].copy_from_slice(&import_rva.to_le_bytes());
         data[dir + 4..dir + 8].copy_from_slice(&(descriptor_bytes as u32).to_le_bytes());
 
@@ -190,7 +215,7 @@ pub fn synthetic_advanced(
     }
 
     // A non-zero load-configuration RVA, so the parser's load-config handling is exercised.
-    let load_config_dir = opt + 88 + DIR_LOAD_CONFIG * 8;
+    let load_config_dir = opt + OFF_DATA_DIRECTORY + DIR_LOAD_CONFIG * 8;
     data[load_config_dir..load_config_dir + 4].copy_from_slice(&0x1200u32.to_le_bytes());
     data[load_config_dir + 4..load_config_dir + 8].copy_from_slice(&0x100u32.to_le_bytes());
 

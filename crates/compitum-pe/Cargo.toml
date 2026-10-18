@@ -15,3 +15,9 @@ categories = ["parser-implementations", "parsing", "os::windows-apis"]
 [dependencies]
 compitum-json = { workspace = true }
 compitum-isa = { workspace = true }
+
+[dev-dependencies]
+# Used only by `tests/real_toolchain.rs`, to verify that the committed corpus files match the
+# digests recorded in their manifest. A dev-dependency keeps it out of the published
+# dependency graph for consumers.
+compitum-digest = { workspace = true }
