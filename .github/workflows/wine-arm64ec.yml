@@ -147,74 +147,89 @@ jobs:
           fi
           echo "ARM64EC is in the configured architecture list"
 
-      - name: Exclude the bundled FFmpeg
+      - name: Compute the subdirectory list without the bundled FFmpeg
+        id: subdirs
         run: |
           cd "$WINE_SRC"
           # `--without-ffmpeg --without-gstreamer` do NOT remove `libs/ffmpeg` from the build:
-          # `EXTERNAL_SUBDIRS` is generated independently of those flags, and the directory was
-          # still present after configure. So it is removed from the generated Makefile.
+          # `EXTERNAL_SUBDIRS` is generated independently of those flags, which was measured
+          # rather than assumed.
           #
-          # # Why this is the right fix rather than a workaround
+          # # Why this is passed to make rather than written into the Makefile
           #
-          # The build failed at:
+          # Editing `EXTERNAL_SUBDIRS` in the generated Makefile does not work. A
+          # configure-generated Makefile carries:
           #
-          #   libs/ffmpeg/arm64ec-windows/libavutil/adler32.o
-          #   /usr/lib/llvm-18/lib/clang/18/include/arm_neon.h:
-          #     error: invalid vector element type 'poly8_t' (aka 'signed char')
-          #     error: invalid conversion between vector type 'int8x16_t' and 'poly16x8_t'
+          #   Makefile: Makefile.in config.status
+          #           ./config.status
           #
-          # Read the path and the cause is visible. `arm64ec` is a hybrid target: the compiler
-          # defines BOTH `__aarch64__` (for the ARM64 code) and the x64 ABI macros. clang's
-          # `arm_neon.h` therefore emits AArch64 NEON definitions -- including the polynomial
-          # types that belong to AArch32 -- while the x64 side of the same translation unit has
-          # already typed those names differently. The two views collide.
+          # so when `config.status` is newer than `Makefile`, make regenerates it and the edit
+          # vanishes. `config.status` is written by configure immediately before any patch, so it
+          # is always newer. This was observed directly: the patch step verified its own edit had
+          # applied, and the build then compiled `libs/ffmpeg` anyway.
           #
-          # That is a clang/arm64ec interaction in a header, surfaced by the bundled FFmpeg. It
-          # says nothing about Wine's ARM64EC support, which configure accepted and which the
-          # aarch64-windows half of the build already passed.
+          # A command-line variable assignment cannot be undone that way, and make passes it down
+          # to sub-makes automatically.
           #
-          # And the bundled FFmpeg is only used by winegstreamer's media DLLs, which the
-          # configure flags above already disable. Proving ARM64EC *execution* needs the loader,
-          # ntdll and kernel32 -- not codecs. Removing it is the correct scope, not a bypass.
+          # # Why excluding it is correct scope rather than a bypass
           #
-          # The dotprod guard from an earlier attempt is also applied, because it is a real
-          # false positive in FFmpeg's probe and will recur if FFmpeg is ever re-enabled.
-          if [ -f libs/ffmpeg/config.h ]; then
-            sed -i \
-              's/#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 1/#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 0/' \
-              libs/ffmpeg/config.h
-          fi
+          # The bundled FFmpeg feeds winegstreamer's media DLLs, which the configure flags above
+          # already disable. Proving ARM64EC *execution* needs the loader, ntdll and kernel32 --
+          # not codecs.
+          #
+          # Its `arm64ec` slice also hits a clang/arm64ec header collision unrelated to Wine:
+          # `arm64ec` defines both `__aarch64__` and the x64 ABI macros, so clang's `arm_neon.h`
+          # emits AArch32 polynomial types into a translation unit whose x64 side has already
+          # typed those names differently.
+          SUBDIRS=$(grep -E "^EXTERNAL_SUBDIRS = " Makefile | head -1 \
+            | sed 's/^EXTERNAL_SUBDIRS = //' \
+            | tr ' ' '\n' | grep -v '^libs/ffmpeg$' | tr '\n' ' ')
 
-          echo "--- EXTERNAL_SUBDIRS before ---"
-          grep -E "^EXTERNAL_SUBDIRS" Makefile
-
-          # Drop libs/ffmpeg from the generated subdirectory list.
-          python3 - <<'PYEOF'
-          import re, pathlib
-          mk = pathlib.Path("Makefile")
-          text = mk.read_text()
-          def strip_ffmpeg(match):
-              value = match.group(1)
-              parts = [p for p in value.split() if p != "libs/ffmpeg"]
-              return "EXTERNAL_SUBDIRS = " + " ".join(parts)
-          new_text, n = re.subn(r"^EXTERNAL_SUBDIRS = (.*)$", strip_ffmpeg, text, flags=re.M)
-          mk.write_text(new_text)
-          print(f"rewrote {n} EXTERNAL_SUBDIRS line(s)")
-          PYEOF
-
-          echo "--- EXTERNAL_SUBDIRS after ---"
-          grep -E "^EXTERNAL_SUBDIRS" Makefile
-          if grep -qE "^EXTERNAL_SUBDIRS = .*libs/ffmpeg" Makefile; then
-            echo "::error::libs/ffmpeg is still in EXTERNAL_SUBDIRS"
+          if [ -z "$SUBDIRS" ]; then
+            echo "::error::could not read EXTERNAL_SUBDIRS from the Makefile"
             exit 1
           fi
-          echo "libs/ffmpeg excluded from the build"
+          case " $SUBDIRS " in
+            *" libs/ffmpeg "*)
+              echo "::error::libs/ffmpeg survived the filter"
+              exit 1
+              ;;
+          esac
+
+          echo "EXTERNAL_SUBDIRS=$SUBDIRS" >> "$GITHUB_ENV"
+          echo "subdirectories kept: $(echo $SUBDIRS | wc -w)"
+          echo "libs/ffmpeg excluded"
+
+      - name: Patch the dotprod guard only if the probe failed
+        if: steps.dotprod.outputs.needed == 'true'
+        run: |
+          cd "$WINE_SRC"
+          # Conditional, and that matters. On this runner the probe correctly reports that
+          # `.arch_extension dotprod` WORKS, so FFmpeg's own config.h already has the guard set
+          # to 1 and its assembly uses `udot` correctly.
+          #
+          # An earlier revision forced the guard to 0 unconditionally. With it off, `ENABLE_DOTPROD`
+          # expands to nothing and the assembly is emitted with the extension disabled, producing:
+          #
+          #   libs/ffmpeg/libswscale/aarch64/input.S:362:9:
+          #     error: instruction requires: dotprod
+          #     udot v2.4s, v16.16b, v0.16b
+          #
+          # So it broke a probe that was already right. It now runs only when the probe genuinely
+          # fails, which is the case on clang-14 but not on this runner's clang-18.
+          sed -i \
+            's/#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 1/#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 0/' \
+            libs/ffmpeg/config.h
+          grep -n HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE libs/ffmpeg/config.h
 
       - name: Build
         run: |
           cd "$WINE_SRC"
           echo "starting at $(date -u +%H:%M:%S)"
-          make -j"$(nproc)"
+          echo "EXTERNAL_SUBDIRS override: $(echo $EXTERNAL_SUBDIRS | wc -w) entries, ffmpeg absent"
+          # The override is a command-line assignment so that make regeneration cannot undo it,
+          # and make propagates it to every sub-make automatically.
+          make -j"$(nproc)" EXTERNAL_SUBDIRS="$EXTERNAL_SUBDIRS"
           echo "finished at $(date -u +%H:%M:%S)"
           echo "--- the loader ---"
           ls -l loader/wine loader/wine64 2>/dev/null || true
