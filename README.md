@@ -1,5 +1,17 @@
 # COMPITUM
 
+<!-- identity:begin -->
+```yaml
+product: COMPITUM
+home: https://github.com/compitum-dev/compitum
+repository: https://github.com/compitum-dev/compitum
+tagline: The universal ARM64 compatibility layer: ABI-aware classification and routing for ARM64 Windows binaries.
+license: MIT OR Apache-2.0
+contact: compitum.dev@gmail.com
+container: ghcr.io/compitum-dev/compitum
+```
+<!-- identity:end -->
+
 **The universal ARM64 compatibility layer.**
 
 COMPITUM answers one question no tool in the world answers today:

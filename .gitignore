@@ -6,6 +6,10 @@
 *.profraw
 *.profdata
 
+# Python bytecode from the repository's dependency-free tooling in tools/.
+__pycache__/
+*.pyc
+
 # Editor and OS noise
 .DS_Store
 Thumbs.db

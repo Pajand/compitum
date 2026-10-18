@@ -1,0 +1,49 @@
+# COMPITUM public identity — the single source of truth.
+#
+# # How to use this file
+#
+# When the domain is registered, fill in `domain` below and run:
+#
+#     python3 tools/identity.py
+#
+# Every reference across the repository updates from this one file, and
+# `python3 tools/identity.py --check` fails CI if anything drifts out of sync.
+# Nothing here is a secret; every value is already public.
+
+[identity]
+
+# The primary domain, without a scheme. Leave empty until it is registered.
+#
+# While it is empty the repository URL is used as the project's home, so every
+# published artefact already points somewhere that resolves. Nothing breaks.
+#
+# Example once purchased:
+#   domain = "compitum.dev"
+domain = ""
+
+# The canonical source repository. This never changes, even after the domain exists:
+# a source link should point at the source.
+repository = "https://github.com/compitum-dev/compitum"
+
+# The human-facing contact address.
+#
+# Transitional value until the domain exists, at which point mail should move to
+# `hello@<domain>` and this becomes the forwarding source. Both may be listed so the
+# transition is invisible to anyone who wrote to the old address.
+contact_email = "compitum.dev@gmail.com"
+
+# The name used in prose and in package descriptions.
+product_name = "COMPITUM"
+
+# The GitHub organisation. Used by the container namespace, which inherits it.
+github_org = "compitum-dev"
+
+# The tagline, kept here so README, npm and PyPI cannot describe the project
+# differently from each other.
+tagline = "The universal ARM64 compatibility layer: ABI-aware classification and routing for ARM64 Windows binaries."
+
+# The licence identifier used in every published manifest. SPDX form.
+license = "MIT OR Apache-2.0"
+
+# A one-line legal attribution line reused in manifests.
+copyright = "The COMPITUM Project and contributors"

@@ -1,0 +1,30 @@
+{
+  "name": "compitum",
+  "version": "0.2.0",
+  "description": "The universal ARM64 compatibility layer: ABI-aware classification and routing for ARM64 Windows binaries.",
+  "keywords": [
+    "arm64",
+    "aarch64",
+    "arm64ec",
+    "arm64x",
+    "abi",
+    "pe",
+    "coff",
+    "windows-on-arm",
+    "compatibility",
+    "classifier"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/compitum-dev/compitum.git"
+  },
+  "homepage": "https://github.com/compitum-dev/compitum#readme",
+  "bugs": {
+    "url": "https://github.com/compitum-dev/compitum/issues"
+  },
+  "author": "The COMPITUM Project and contributors",
+  "engines": {
+    "node": ">=14"
+  }
+}

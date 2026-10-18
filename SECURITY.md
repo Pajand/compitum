@@ -6,7 +6,7 @@ Do **not** open a public issue for a security problem.
 
 Report privately through GitHub's [security advisory
 form](https://github.com/compitum-dev/compitum/security/advisories/new), or by email to the
-address published in the repository profile. Include:
+compitum.dev@gmail.com. Include:
 
 - what you can do that you should not be able to,
 - the smallest input that demonstrates it,

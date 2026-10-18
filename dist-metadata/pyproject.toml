@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "compitum"
+version = "0.2.0"
+description = """
+The universal ARM64 compatibility layer: ABI-aware classification and routing for ARM64 Windows binaries.
+"""
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "The COMPITUM Project and contributors" }]
+keywords = ["arm64", "aarch64", "arm64ec", "arm64x", "abi", "pe", "coff", "windows-on-arm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: System :: Emulators",
+]
+
+[project.urls]
+Homepage = "https://github.com/compitum-dev/compitum"
+Repository = "https://github.com/compitum-dev/compitum"
+Issues = "https://github.com/compitum-dev/compitum/issues"

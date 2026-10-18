@@ -222,5 +222,12 @@ jobs:
       - name: Show the publish order this repository implies
         run: python3 tools/publish_order.py --run-cargo
 
+      # The domain is registered in one file (`identity.toml`) and every reference is
+      # derived from it. That only holds if drift is fatal, because a stale URL inside a
+      # published crate cannot be corrected without burning a version number. This runs
+      # before anything is published, which is the only moment the mistake is still cheap.
+      - name: Every reference must agree with identity.toml
+        run: python3 tools/identity.py --check
+
       - name: No credential-shaped strings in the tree
         run: python3 .github/scripts/check_secrets.py .
