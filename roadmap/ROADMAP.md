@@ -276,6 +276,36 @@ Finding 4 is the one worth dwelling on. The test suite did not merely confirm th
 works — it found a reasoning error that would have made the product confidently wrong about
 the single most common class of Windows binary in existence.
 
+**2026-10-18 — Continuous integration green on real hardware**
+
+```
+GitHub Actions, run 39082732474, commit 93e3fe4
+  build and test (aarch64)   success
+  build and report (x86_64)  success
+  translation catalogs       success
+  package metadata           success
+```
+
+The ARM64 job is the one that matters: it runs the full test suite, the per-route
+invariants over four synthetic fixtures, and the exit-code contract, on a genuine
+AArch64 machine rather than an emulated one.
+
+The first CI run was a failure, and it was worth more than a pass would have been. Three
+of four jobs succeeded; the package-metadata job failed because of a flaw in the gate
+itself. `cargo package` resolves dependencies against the *registry*, not the workspace,
+so in a fresh crate family a member cannot be packaged until its own dependencies are
+published — and the naive loop treated that expected state as a defect. A gate that fails
+on a healthy repository is worse than no gate, because it teaches people to ignore the
+result. It now distinguishes *awaiting a dependency* from *defective*, and fails only on
+the latter.
+
+Also added `tools/publish_order.py`, which derives the publication order from the real
+dependency graph. The order is load-bearing: a rejected publish permanently consumes the
+version number, so it must be right the first time.
+
+**Phase 0 is complete.** Six implemented crates, 312 tests, zero build warnings, zero
+third-party dependencies, and a gate that runs on ARM64 and on x86_64.
+
 ---
 
 ## 7. DECISION LOG
