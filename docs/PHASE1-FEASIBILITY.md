@@ -254,6 +254,101 @@ and the CHPE identification — were of the same shape: a system agreeing with i
 
 The 150-jiffie threshold and the zero-comparison guard are both instances of that rule.
 
+## The ARM64EC gap, measured precisely
+
+Task 1.3 of Phase 1 is ARM64EC execution. The blocker was investigated rather than assumed, and
+it is now three measured facts instead of an open question.
+
+### Fact 1: the installed Wine is too old, and it is a glibc problem, not a Wine problem
+
+Ubuntu 22.04 ships Wine 6.0.3. ARM64EC support began in Wine 8.21 (October 2023), so the
+installed version predates it by more than two years. `wine64-development` in the same archive
+also resolves to 6.0, so the archive offers no upgrade.
+
+A prebuilt **Wine 10.0 for arm64** exists in Debian trixie, and it was downloaded and tested:
+
+```text
+wine64_10.0~repack-6_arm64.deb     extracted, 747 aarch64-windows builtins present
+wine64 --version
+  -> wine: could not load ntdll.so: /lib/aarch64-linux-gnu/libc.so.6:
+     version `GLIBC_2.38' not found (required by .../aarch64-unix/ntdll.so)
+```
+
+Ubuntu 22.04 provides glibc 2.35. Wine 10.0 needs **2.38**. So the prebuilt route is closed by
+the host distribution's age, not by anything about ARM64EC.
+
+### Fact 2: Wine 11.20 supports ARM64EC in its build system
+
+The source was downloaded (44.6 MB compressed, 416.7 MB extracted) and configured. Wine's
+architecture vocabulary is:
+
+```text
+$ ./configure --help | grep enable-archs
+  --enable-archs={i386,x86_64,arm,aarch64,arm64ec,none}
+```
+
+and the validation accepts exactly those:
+
+```text
+i386|x86_64|arm|aarch64|arm64ec) cross_archs="$cross_archs $arch" ;;
+```
+
+**`arm64ec` is a first-class architecture.** The source contains 256 occurrences of the string
+across 52 files in `dlls/`.
+
+*Correction worth recording:* the first configure attempt used `aarch64ec` and failed with
+`Unknown cross-compilation architecture`. Wine spells it `arm64ec`. The error was mine, and
+assuming it meant "ARM64EC is unsupported" would have been wrong — which is exactly why the
+message was read rather than interpreted.
+
+### Fact 3: a successful configure with ARM64EC, and where the build stopped
+
+With clang, lld and llvm-dlltool present, configure succeeded and produced:
+
+```text
+$ grep PE_ARCHS Makefile
+PE_ARCHS =  aarch64 arm64ec x86_64 i386
+```
+
+**All four architectures configured, ARM64EC included.** The build then ran and produced over
+1000 object files, including `arm64ec-windows` outputs, before stopping at a single precise
+error in the bundled FFmpeg:
+
+```text
+libs/ffmpeg/libavutil/aarch64/asm.S:112:17: error: unknown architectural extension: dotprod
+.arch_extension nodotprod
+```
+
+clang-14 does not know `.arch_extension dotprod`. clang-15 was installed and tested: it knows
+`sve`, `sve2`, `sme` and `crc` but **also not `dotprod`**, while `-march=armv8.2-a+dotprod`
+does work. So the failing line is an assembler-directive limitation, not an architecture
+limitation.
+
+### What this leaves
+
+| Route to ARM64EC | Status |
+|---|---|
+| Installed Wine 6.0.3 | ✗ predates ARM64EC by two years |
+| Ubuntu archive upgrade | ✗ `wine64-development` is also 6.0 |
+| Prebuilt Wine 10 arm64 (Debian) | ✗ needs glibc 2.38; host has 2.35 |
+| **Build Wine 11.20 from source** | ⚠ configure succeeds with ARM64EC; build stops at one FFmpeg assembler directive |
+| `proton-wine` (the roadmap's original plan) | ⚠ carries an `arm64ec` target; same class of build, with the fix already applied |
+
+**The gap is now one directive wide.** Every remaining option is a build, and the build's only
+demonstrated blocker is a `.arch_extension dotprod` line that `-march` handles. That is a
+patch, not a research problem.
+
+### What was *not* achieved, stated plainly
+
+The build did **not** complete within this session. Repeated attempts were killed after running
+for a while — this environment does not keep a long build alive across tool invocations, which
+was itself the risk the roadmap flagged when it named memory and libc as Phase 1's hazards.
+
+So the honest position is: **the blocker is identified, characterised and one directive wide,
+but the ARM64EC build has not been proven to finish here.** Anyone continuing should either run
+the build in a session that can stay alive for several hours, or use `proton-wine`, which
+already carries the fix.
+
 ## What this does *not* claim
 
 - It does **not** claim arbitrary ARM64 Windows applications run. The probe makes no NT calls,

@@ -465,8 +465,39 @@ roadmap originally planned for. Full measurements and reproduction steps are in
 |---|---|---|
 | 1.1 | Native ARM64 execution under Wine | ✅ **met** — measured, documented |
 | 1.2 | **Prediction matched observation, end to end** | ✅ **met** — 6 of 6, `tools/loopcheck.sh` |
-| 1.3 | ARM64EC hybrid execution | ⬜ needs Wine ≥ 8.21, or a `proton-wine` build |
+| 1.3 | ARM64EC hybrid execution | ⚠️ **one directive wide** — Wine 11.20 configures `arm64ec`; build stops at `.arch_extension dotprod` in bundled FFmpeg |
 | 1.4 | NT syscall translation beyond process startup | ⬜ untested; needs a binary that makes calls |
+
+**Task 1.3 (ARM64EC) narrowed to one directive.** The blocker was investigated rather than
+assumed, and it is now three measured facts:
+
+1. **Ubuntu 22.04's Wine 6.0.3 predates ARM64EC by two years** — Wine 8.21 introduced it in
+   October 2023, and `wine64-development` in the same archive is also 6.0. No archive upgrade
+   exists.
+2. **A prebuilt Wine 10.0 arm64 exists in Debian trixie and was tested.** It fails with
+   `version 'GLIBC_2.38' not found` against this host's glibc 2.35. The prebuilt route is closed
+   by the *distribution's* age, not by ARM64EC.
+3. **Wine 11.20 configured successfully with ARM64EC.** Its architecture vocabulary is
+   `{i386,x86_64,arm,aarch64,arm64ec,none}` and the result was
+   `PE_ARCHS = aarch64 arm64ec x86_64 i386`. Over 1000 object files built, including
+   `arm64ec-windows` outputs, before stopping at one assembler directive in the bundled FFmpeg:
+
+   ```text
+   libs/ffmpeg/libavutil/aarch64/asm.S:112:17: error: unknown architectural extension: dotprod
+   ```
+
+   Neither clang-14 nor clang-15 knows `.arch_extension dotprod`, while `-march=armv8.2-a+dotprod`
+   works. It is an assembler-directive limitation, not an architecture limitation.
+
+**The gap is one directive wide.** Every remaining route is a build, and the build's only
+demonstrated blocker is patchable. What is *not* proven is that the build finishes in this
+environment: repeated attempts were killed after running for a while, which is the same hazard
+the roadmap flagged when it named memory and libc as Phase 1's risks. A session that stays alive
+for several hours, or `proton-wine` which already carries the fix, would settle it.
+
+*Recorded because it was my error:* the first configure attempt used `aarch64ec` and failed with
+`Unknown cross-compilation architecture`. Wine spells it `arm64ec`. Reading that error as
+"ARM64EC is unsupported" would have been a wrong conclusion drawn from a typo.
 
 **Task 1.2 is the one that matters, and it is the project's central claim.** It is no longer
 asserted; it is measured:
