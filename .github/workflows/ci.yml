@@ -109,8 +109,17 @@ jobs:
           if [ "$code" != "0" ]; then echo "::error::a runnable subject must exit 0, got $code"; exit 1; fi
 
           # 2: the command ran, and the verdict was unfavourable. This is an ANSWER, not an error.
+          #
+          # The subject is refused on ARCHITECTURE, not on a missing CPU feature. That
+          # distinction is load-bearing: an ISA-based refusal is host-dependent, because
+          # `needs-sve-sme.exe` refuses on a CPU without SVE and runs on one with it. This test
+          # originally used that fixture, passed on a device lacking SVE, and failed on GitHub's
+          # ARM runner, which implements it. A test whose outcome depends on which machine runs
+          # it is not testing the software.
+          #
+          # IA-64 is refused by architecture, so the result is identical on every host.
           set +e
-          "$BIN" verify /tmp/fixtures/needs-sve-sme.exe --backends wine >/dev/null 2>&1
+          "$BIN" verify /tmp/fixtures/unsupported-ia64.exe --backends wine >/dev/null 2>&1
           code=$?
           set -e
           if [ "$code" != "2" ]; then echo "::error::an un-runnable subject must exit 2, got $code"; exit 1; fi

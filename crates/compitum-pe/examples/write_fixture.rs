@@ -83,6 +83,19 @@ fn main() {
             ),
         ),
         (
+            // An architecture no route can serve, on any host.
+            //
+            // Added because the exit-code contract test used an ISA-based refusal and was
+            // therefore HOST-DEPENDENT: `needs-sve-sme.exe` refuses on a CPU without SVE and
+            // runs on one with it, so the test passed on the development device and failed on
+            // GitHub's ARM runner. A test whose outcome depends on which machine runs it is
+            // not testing the software.
+            //
+            // IA-64 is refused by architecture, so the result is the same everywhere.
+            "unsupported-ia64.exe",
+            synthetic(0x0200, subsystem::CONSOLE, false),
+        ),
+        (
             // A 16 KiB page-size image: the shape a host migrating to larger pages will see.
             "page16k-arm64.exe",
             synthetic_advanced(
@@ -113,8 +126,18 @@ fn main() {
     // something to find. The bytes are a plausible SVE encoding, not a functioning program.
     let sve_code: Vec<u8> = {
         let mut code = vec![0u8; 64];
+        // A scalable-vector opcode, which the scanner detects from the 0x04/0x25 space.
         code[8..12].copy_from_slice(&0x0420_0002u32.to_le_bytes());
-        code[16..20].copy_from_slice(&0xC0C0_0000u32.to_le_bytes()); // SME outer product
+        // An SVE/SME system-register access: the `0xD5` page with CRn == 0xC, which is the
+        // operand position the architecture assigns to the SVE and SME system registers.
+        //
+        // An earlier revision wrote 0xC0C0_0000 here, labelled "SME outer product". Only a
+        // band rule that matched 3.12% of encoding space and had zero true positives ever
+        // detected it, so when that rule was removed the fixture quietly stopped requiring
+        // SME -- and a CI test that depended on it began failing on hardware whose SVE support
+        // made the remaining SVE requirement satisfiable. A fixture must exercise the rule
+        // that exists in the code, not the rule the author imagined.
+        code[16..20].copy_from_slice(&(0xD500_0000u32 | (0xC << 12)).to_le_bytes());
         code
     };
     let path = dir.join("needs-sve-sme.exe");
