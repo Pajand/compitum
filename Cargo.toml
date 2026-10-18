@@ -8,6 +8,7 @@ members = [
     "crates/compitum-pe",
     "crates/compitum-router",
     "crates/compitum-oracle",
+    "crates/compitum-exec",
     "crates/compitum-cli",
 ]
 
@@ -29,6 +30,7 @@ compitum-isa = { version = "0.1.0", path = "crates/compitum-isa" }
 compitum-pe = { version = "0.1.0", path = "crates/compitum-pe" }
 compitum-router = { version = "0.1.0", path = "crates/compitum-router" }
 compitum-oracle = { version = "0.1.0", path = "crates/compitum-oracle" }
+compitum-exec = { version = "0.1.0", path = "crates/compitum-exec" }
 
 # Zero external dependencies, by design. See ROADMAP Law 5: the workspace must build
 # offline and stay trivially auditable.

@@ -1,0 +1,15 @@
+[package]
+name = "compitum-exec"
+description = "Executes a binary through a chosen route and records what actually happened."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+readme = "README.md"
+
+[dependencies]
+compitum-json = { workspace = true }
+compitum-oracle = { workspace = true }

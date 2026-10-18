@@ -26,6 +26,7 @@ OUR_CRATES = {
     "compitum-pe",
     "compitum-router",
     "compitum-oracle",
+    "compitum-exec",
     "compitum-cli",
 }
 

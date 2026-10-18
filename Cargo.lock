@@ -20,6 +20,14 @@ name = "compitum-digest"
 version = "0.1.0"
 
 [[package]]
+name = "compitum-exec"
+version = "0.1.0"
+dependencies = [
+ "compitum-json",
+ "compitum-oracle",
+]
+
+[[package]]
 name = "compitum-i18n"
 version = "0.1.0"
 dependencies = [
