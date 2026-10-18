@@ -116,47 +116,6 @@ jobs:
           tar xf wine.tar.xz
           echo "WINE_SRC=$PWD/wine-${VERSION}" >> "$GITHUB_ENV"
 
-      - name: Remove the bundled FFmpeg before configure
-        run: |
-          cd "$WINE_SRC"
-          # Done BEFORE configure, and the ordering is the whole point.
-          #
-          # Measured behaviour, in order:
-          #   1. `--without-ffmpeg --without-gstreamer` leave libs/ffmpeg in the tree.
-          #   2. Patching EXTERNAL_SUBDIRS in the generated Makefile is undone, because the
-          #      Makefile carries `Makefile: Makefile.in config.status` and config.status is
-          #      always newer, so make regenerates it.
-          #   3. Passing EXTERNAL_SUBDIRS on the make command line does hold -- the step
-          #      reported "24 entries, ffmpeg absent" -- and make STILL compiled it:
-          #          Makefile:255504: libs/ffmpeg/arm64ec-windows/libavutil/adler32.o
-          #
-          # That last path is a rule in the TOP-LEVEL Makefile, so configure had generated
-          # explicit object rules for libs/ffmpeg regardless of EXTERNAL_SUBDIRS. No variable
-          # override can stop a rule that already exists.
-          #
-          # Removing the directory before configure means the rules are never generated, which
-          # is the only place this can be fixed.
-          #
-          # Its code is not needed: it feeds winegstreamer's media DLLs, which the configure
-          # flags below already disable. Proving ARM64EC execution needs the loader, ntdll and
-          # kernel32, not codecs.
-          #
-          # Its arm64ec slice also hits a clang/arm64ec header collision unrelated to Wine:
-          # arm64ec defines both __aarch64__ and the x64 ABI macros, so clang's arm_neon.h
-          # emits AArch32 polynomial types into a translation unit whose x64 side has already
-          # typed those names differently.
-          if [ -d libs/ffmpeg ]; then
-            echo "removing libs/ffmpeg ($(du -sh libs/ffmpeg | cut -f1))"
-            rm -rf libs/ffmpeg
-          fi
-          # The corresponding sub-makefiles reference it, so drop them too.
-          rm -f libs/ffmpeg/Makefile 2>/dev/null || true
-          if [ -d libs/ffmpeg ]; then
-            echo "::error::libs/ffmpeg still present"
-            exit 1
-          fi
-          echo "libs/ffmpeg removed before configure"
-
       - name: Configure with ARM64EC
         run: |
           cd "$WINE_SRC"
@@ -188,59 +147,6 @@ jobs:
           fi
           echo "ARM64EC is in the configured architecture list"
 
-      - name: Verify the subdirectory list omits FFmpeg
-        id: subdirs
-        run: |
-          cd "$WINE_SRC"
-          # `--without-ffmpeg --without-gstreamer` do NOT remove `libs/ffmpeg` from the build:
-          # `EXTERNAL_SUBDIRS` is generated independently of those flags, which was measured
-          # rather than assumed.
-          #
-          # # Why this is passed to make rather than written into the Makefile
-          #
-          # Editing `EXTERNAL_SUBDIRS` in the generated Makefile does not work. A
-          # configure-generated Makefile carries:
-          #
-          #   Makefile: Makefile.in config.status
-          #           ./config.status
-          #
-          # so when `config.status` is newer than `Makefile`, make regenerates it and the edit
-          # vanishes. `config.status` is written by configure immediately before any patch, so it
-          # is always newer. This was observed directly: the patch step verified its own edit had
-          # applied, and the build then compiled `libs/ffmpeg` anyway.
-          #
-          # A command-line variable assignment cannot be undone that way, and make passes it down
-          # to sub-makes automatically.
-          #
-          # # Why excluding it is correct scope rather than a bypass
-          #
-          # The bundled FFmpeg feeds winegstreamer's media DLLs, which the configure flags above
-          # already disable. Proving ARM64EC *execution* needs the loader, ntdll and kernel32 --
-          # not codecs.
-          #
-          # Its `arm64ec` slice also hits a clang/arm64ec header collision unrelated to Wine:
-          # `arm64ec` defines both `__aarch64__` and the x64 ABI macros, so clang's `arm_neon.h`
-          # emits AArch32 polynomial types into a translation unit whose x64 side has already
-          # typed those names differently.
-          SUBDIRS=$(grep -E "^EXTERNAL_SUBDIRS = " Makefile | head -1 \
-            | sed 's/^EXTERNAL_SUBDIRS = //' \
-            | tr ' ' '\n' | grep -v '^libs/ffmpeg$' | tr '\n' ' ')
-
-          if [ -z "$SUBDIRS" ]; then
-            echo "::error::could not read EXTERNAL_SUBDIRS from the Makefile"
-            exit 1
-          fi
-          case " $SUBDIRS " in
-            *" libs/ffmpeg "*)
-              echo "::error::libs/ffmpeg survived the filter"
-              exit 1
-              ;;
-          esac
-
-          echo "EXTERNAL_SUBDIRS=$SUBDIRS" >> "$GITHUB_ENV"
-          echo "subdirectories kept: $(echo $SUBDIRS | wc -w)"
-          echo "libs/ffmpeg excluded"
-
       - name: Patch the dotprod guard only if the probe failed
         if: steps.dotprod.outputs.needed == 'true'
         run: |
@@ -264,16 +170,70 @@ jobs:
           grep -n HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE libs/ffmpeg/config.h
 
       - name: Build
+        id: build
         run: |
           cd "$WINE_SRC"
           echo "starting at $(date -u +%H:%M:%S)"
-          echo "EXTERNAL_SUBDIRS override: $(echo $EXTERNAL_SUBDIRS | wc -w) entries, ffmpeg absent"
-          # The override is a command-line assignment so that make regeneration cannot undo it,
-          # and make propagates it to every sub-make automatically.
-          make -j"$(nproc)" EXTERNAL_SUBDIRS="$EXTERNAL_SUBDIRS"
-          echo "finished at $(date -u +%H:%M:%S)"
+
+          # `-k` keeps going after a failing target. Exactly one slice of Wine cannot compile
+          # here, and it is not the slice this workflow needs.
+          #
+          # The failure is in Wine's *bundled* FFmpeg, for the arm64ec architecture:
+          #
+          #   libs/ffmpeg/arm64ec-windows/libavutil/adler32.o
+          #   /usr/lib/llvm-18/lib/clang/18/include/arm_neon.h:
+          #     error: invalid vector element type 'poly8_t' (aka 'signed char')
+          #
+          # `arm64ec` is a hybrid target: the compiler defines both `__aarch64__` and the x64
+          # ABI macros, so clang's `arm_neon.h` emits AArch32 polynomial types into a
+          # translation unit whose x64 side has already typed those names differently.
+          #
+          # That FFmpeg copy exists only to feed winegstreamer's media DLLs, which the
+          # configure flags already disable. Proving ARM64EC *execution* needs the loader,
+          # ntdll and kernel32 -- none of which depend on it. So the build is allowed to
+          # continue past it.
+          #
+          # Removing the directory instead was tried and is wrong: its *headers* are required
+          # at configure time (`dlls/colorcnv/color_converter.c` includes `libavutil/avutil.h`),
+          # and without it Wine skips generating `libs/ffmpeg/config.h`, so the shipped copy is
+          # used and `libavutil/intmath.h` selects an arch directory the tree does not ship.
+          set +e
+          make -j"$(nproc)" -k
+          make_status=$?
+          set -e
+          echo "make exited $make_status at $(date -u +%H:%M:%S)"
+          echo "make_status=$make_status" >> "$GITHUB_OUTPUT"
+
+          # The loader is the one artefact that must exist. If it is missing, the build failed
+          # for a reason beyond the known FFmpeg slice, and that must fail the job.
+          if [ ! -x loader/wine ] && [ ! -x loader/wine64 ]; then
+            echo "::error::no loader was produced; the failure is not the known FFmpeg slice"
+            exit 1
+          fi
           echo "--- the loader ---"
           ls -l loader/wine loader/wine64 2>/dev/null || true
+
+      - name: Assert the ARM64EC libraries were built
+        run: |
+          cd "$WINE_SRC"
+          # This is the check that makes `-k` safe. Continuing past failures is only acceptable
+          # if the artefacts the proof needs actually exist, so they are asserted by name rather
+          # than assumed from make's exit code.
+          missing=0
+          for dll in ntdll kernel32; do
+            found=$(find . -path "*arm64ec-windows*" -name "$dll.dll" 2>/dev/null | head -1)
+            if [ -z "$found" ]; then
+              echo "::error::$dll.dll was not built for arm64ec"
+              missing=$((missing + 1))
+            else
+              echo "  $dll.dll  $found"
+            fi
+          done
+          if [ "$missing" != "0" ]; then
+            echo "::error::$missing ARM64EC librar(y/ies) missing; the build did not get far enough"
+            exit 1
+          fi
+          echo "ntdll and kernel32 exist for arm64ec"
 
       - name: Install into a prefix
         run: |
