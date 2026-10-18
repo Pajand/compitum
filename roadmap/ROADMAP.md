@@ -492,13 +492,50 @@ remains the right answer, but for the **hybrid case only**, which is a narrower 
 roadmap originally planned for. Full measurements and reproduction steps are in
 `docs/PHASE1-FEASIBILITY.md`.
 
-### Phase 1: three of four tasks met
+### Phase 1: complete
+
+**All four tasks are met.** Task 1.3 — ARM64EC execution — needed no build at all, which is the
+opposite of what four earlier attempts assumed.
+
+Measured on an ARM64 CI runner with its stock Wine 9.0:
+
+```text
+control   (plain ARM64)   : exit 124  -> executed
+subject   (ARM64EC)       : exit 124  -> executed
+VERDICT: ARM64EC EXECUTES on this machine's Wine.
+```
+
+The control runs first and is why the result can be trusted: `real-console-4k.exe` is plain
+ARM64 and already proven to execute, so if it had not run, the environment would have been wrong
+and the ARM64EC reading meaningless.
+
+**A five-hour Wine build was therefore unnecessary**, and was cancelled. Four earlier attempts
+went the other way — straight to `configure` and `make` — and each stalled or failed for a reason
+that a five-minute check would have rendered irrelevant. The lesson from the rest of this project
+applied here too: **measure the cheap path first; the expensive one has to earn its cost.**
+
+### Superseded: the "one directive wide" analysis
+
+Earlier revisions of this document recorded the ARM64EC gap as *"one `.arch_extension dotprod`
+directive wide"*, reached by building Wine 11.20 from source. That analysis was correct about
+that build and irrelevant to the question:
+
+| Path | Outcome |
+|---|---|
+| Build Wine 11.20 from source | Configured `arm64ec`; stopped at one FFmpeg assembler directive |
+| **Install the runner's existing Wine 9.0** | ✅ **executes ARM64EC** |
+| Debian trixie's prebuilt Wine 10.0 | Blocked only by needing glibc 2.38 against a 2.35 host |
+
+The build was never the only route, and it was the most expensive one. The work to characterise it
+is preserved in `docs/BUILDING-ARM64EC-WINE.md` in case a newer Wine is ever needed for another
+reason, and the workflow that performed it was removed because keeping it would imply the build
+is required.
 
 | # | Task | Evidence |
 |---|---|---|
 | 1.1 | Native ARM64 execution | `real-console-4k.exe` ran; 6.6 CPU-seconds measured in an 8-second window |
 | 1.2 | Prediction matched observation | 6 of 6, `tools/loopcheck.sh`, separation `+0` vs `+420` jiffies |
-| 1.3 | ARM64EC hybrid execution | ⚠️ Wine 11.20 configures `arm64ec`; build stops at one FFmpeg assembler directive |
+| 1.3 | ARM64EC hybrid execution | ✅ **met** — Wine 9.0 on an ARM64 runner executes the ARM64EC fixture; no build needed |
 | 1.4 | NT syscall translation | four distinct exit codes propagated exactly |
 
 **Task 1.4 — the syscall layer — is proven with a control.** A binary that only loops exercises
@@ -554,7 +591,7 @@ refused, and all six corpus files route correctly and unchanged.
 |---|---|---|
 | 1.1 | Native ARM64 execution under Wine | ✅ **met** — measured, documented |
 | 1.2 | **Prediction matched observation, end to end** | ✅ **met** — 6 of 6, `tools/loopcheck.sh` |
-| 1.3 | ARM64EC hybrid execution | ⚠️ **one directive wide** — Wine 11.20 configures `arm64ec`; build stops at `.arch_extension dotprod` in bundled FFmpeg |
+| 1.3 | ARM64EC hybrid execution | ✅ **met** — Wine 9.0 on an ARM64 runner executes the ARM64EC fixture; **no build needed** |
 | 1.4 | **NT syscall translation** | ✅ **met** — four exit codes (0, 7, 42, 99) propagated exactly through Wine from a real ARM64 `ExitProcess` call |
 
 **Task 1.3 (ARM64EC) narrowed to one directive.** The blocker was investigated rather than
@@ -578,18 +615,39 @@ assumed, and it is now three measured facts:
    Neither clang-14 nor clang-15 knows `.arch_extension dotprod`, while `-march=armv8.2-a+dotprod`
    works. It is an assembler-directive limitation, not an architecture limitation.
 
-**The gap is one directive wide.** Every remaining route is a build, and the build's only
-demonstrated blocker is patchable. What is *not* proven is that the build finishes in this
-environment: repeated attempts were killed after running for a while, which is the same hazard
-the roadmap flagged when it named memory and libc as Phase 1's risks. A session that stays alive
-for several hours, or `proton-wine` which already carries the fix, would settle it.
+**Then the cheap check made all of it moot.** An ARM64 runner's stock Wine 9.0 executes the
+ARM64EC fixture directly:
 
-*Recorded because it was my error:* the first configure attempt used `aarch64ec` and failed with
-`Unknown cross-compilation architecture`. Wine spells it `arm64ec`. Reading that error as
-"ARM64EC is unsupported" would have been a wrong conclusion drawn from a typo.
+```text
+control   (plain ARM64)   : exit 124  -> executed
+subject   (ARM64EC)       : exit 124  -> executed
+VERDICT: ARM64EC EXECUTES on this machine's Wine.
+```
 
-**Task 1.2 is the one that matters, and it is the project's central claim.** It is no longer
-asserted; it is measured:
+So the investigation above answered a question that did not need asking. The three facts remain
+accurate about the *build path* and are kept in `docs/BUILDING-ARM64EC-WINE.md` in case a newer
+Wine is ever needed for another reason — but the build was never required, and it was the most
+expensive route available.
+
+Four attempts went straight to `configure` and `make`, and each stalled or failed for a reason a
+five-minute check would have rendered irrelevant. That is the same lesson as everywhere else in
+this project, applied to priorities rather than to code: **measure the cheap path first; the
+expensive one has to earn its cost.**
+
+*Recorded because it was my error:* an early configure used `aarch64ec` and failed with
+`Unknown cross-compilation architecture`. Wine spells it `arm64ec`. Reading that as "ARM64EC is
+unsupported" would have been a wrong conclusion drawn from a typo.
+
+**Task 1.2 is the project's central claim.** It is no longer asserted; it is measured:
+
+Measured with Wine 6.0.3, and **before** the ARM64EC fixture was corrected to carry ARM64 code
+rather than x86-64. Under that version the row reads `not-running(+0)`, which is the right answer
+for a Wine that predates ARM64EC by two years — and the router's `fex_partial` prediction is a
+statement that *translation would be needed*, so a refusal is consistent with it rather than
+contradicting it.
+
+The table is kept as the record of that run. The corresponding measurement on Wine 9.0 is the
+probe result at the top of this section.
 
 ```text
 binary                   predicted          observed          verdict

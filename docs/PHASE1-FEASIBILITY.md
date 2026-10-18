@@ -2,10 +2,34 @@
 
 **Date:** 2026-10-18
 **Status:** measured on the development device
-**Verdict:** the execution bridge **works today** for native ARM64, and is verified beyond
-loading — six of six routing predictions matched observation, and NT syscall translation is
-proven by four distinct exit codes propagating through Wine. The remaining gap is ARM64EC, and
-it is a dated version floor rather than an open research problem.
+**Verdict:** **all four Phase 1 tasks are met.** The execution bridge works for native ARM64
+*and* ARM64EC, and it is verified beyond loading — six of six routing predictions matched
+observation, and NT syscall translation is proven by four distinct exit codes propagating
+through Wine.
+
+**ARM64EC runs without any build.** Measured on an ARM64 CI runner, whose stock archive carries
+Wine 9.0:
+```text
+=== trying /usr/bin/wine
+    version: wine-9.0 (Ubuntu 9.0~repack-4build3)
+    control (plain ARM64, known to execute):
+      raw exit code: 124   -> executed
+    ==> WORKS
+
+control   (plain ARM64)   : exit 124  -> executed
+subject   (ARM64EC)       : exit 124  -> executed
+
+VERDICT: ARM64EC EXECUTES on this machine's Wine.
+```
+
+The control runs first and is the reason this result can be trusted. `real-console-4k.exe` is
+plain ARM64 and was already proven to execute during Phase 1; if it had not burned CPU here,
+the environment would have been wrong and the ARM64EC reading would have meant nothing.
+
+**A multi-hour Wine build was therefore unnecessary**, and was cancelled. The whole reason for
+running this probe before committing to the build was the lesson from the rest of this project:
+measure the cheap path first. It cost five minutes and made a five-hour build redundant.
+
 
 ---
 
@@ -399,26 +423,38 @@ limitation.
 
 | Route to ARM64EC | Status |
 |---|---|
-| Installed Wine 6.0.3 | ✗ predates ARM64EC by two years |
-| Ubuntu archive upgrade | ✗ `wine64-development` is also 6.0 |
-| Prebuilt Wine 10 arm64 (Debian) | ✗ needs glibc 2.38; host has 2.35 |
-| **Build Wine 11.20 from source** | ⚠ configure succeeds with ARM64EC; build stops at one FFmpeg assembler directive |
-| `proton-wine` (the roadmap's original plan) | ⚠ carries an `arm64ec` target; same class of build, with the fix already applied |
+| Installed Wine 6.0.3 (dev device) | ✗ predates ARM64EC by two years — and correctly refuses the fixture, exit 123 |
+| Ubuntu 22.04 archive upgrade | ✗ `wine64-development` is also 6.0 |
+| Prebuilt Wine 10 arm64 (Debian trixie) | ✗ needs glibc 2.38; this host has 2.35 |
+| Build Wine 11.20 from source | ⚠ configures `arm64ec`; stops at one FFmpeg assembler directive — **no longer needed** |
+| **Install the ARM64 runner's Wine 9.0** | ✅ **executes ARM64EC — this is the answer** |
 
-**The gap is now one directive wide.** Every remaining option is a build, and the build's only
-demonstrated blocker is a `.arch_extension dotprod` line that `-march` handles. That is a
-patch, not a research problem.
+**None of the build work was necessary.** Every row above describes a real obstacle on a real
+path, and the cheapest path was not on the list until it was tried. An ARM64 CI runner's stock
+archive carries Wine 9.0, one `apt-get install` away, and it executes the ARM64EC fixture:
 
-### What was *not* achieved, stated plainly
+```text
+control   (plain ARM64)   : exit 124  -> executed
+subject   (ARM64EC)       : exit 124  -> executed
+VERDICT: ARM64EC EXECUTES on this machine's Wine.
+```
 
-The build did **not** complete within this session. Repeated attempts were killed after running
-for a while — this environment does not keep a long build alive across tool invocations, which
-was itself the risk the roadmap flagged when it named memory and libc as Phase 1's hazards.
+The build work is preserved in `docs/BUILDING-ARM64EC-WINE.md` for a future case where a
+specific newer Wine is needed for some other reason. It is not required for this project.
 
-So the honest position is: **the blocker is identified, characterised and one directive wide,
-but the ARM64EC build has not been proven to finish here.** Anyone continuing should either run
-the build in a session that can stay alive for several hours, or use `proton-wine`, which
-already carries the fix.
+### The lesson, stated once
+
+Four attempts went straight to `configure` and `make` — hours each — before anyone asked whether
+a five-minute check would settle the question. It did. The instrument for that check then had
+five defects of its own, each of which reported something other than what happened, including one
+that would have concluded "ARM64EC is impossible" on a machine where it works.
+
+```
+measure the cheap path first; the expensive one has to earn its cost
+and establish that the instrument works before trusting what it measures
+```
+
+Both halves of that are the same discipline, and both were learned here by failing to apply it.
 
 ## What this does *not* claim
 
