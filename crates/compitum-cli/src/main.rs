@@ -516,16 +516,23 @@ fn declared_requirements(options: &Options) -> Result<Vec<Requirement>, String> 
 
 /// Resolves which translation backends are available.
 ///
-/// The default is deliberately pessimistic: discovering that FEX is installed requires
-/// probing the filesystem in ways that vary by distribution, and a false positive would make
-/// COMPITUM promise a route that cannot be taken. A user who knows their machine passes
-/// `--backends` or `--assume-backends`.
+/// # Why this looks instead of assuming
+///
+/// An earlier revision defaulted to "Wine is installed" and required the operator to correct it
+/// with `--backends`. That default was chosen deliberately — discovering the truth "varies by
+/// distribution, and a false positive would make COMPITUM promise a route it cannot take" — and
+/// the reasoning identified the right risk while reaching the wrong remedy. The answer to
+/// "guessing might be wrong" is to **look**, not to guess pessimistically.
+///
+/// So discovery runs by default. `--backends` still overrides it, for a machine where the
+/// backends are somewhere discovery does not search, and `--assume-backends` remains for
+/// deliberately evaluating a hypothetical host.
 fn resolve_backends(options: &Options) -> BackendSet {
     if options.assume_backends {
         return BackendSet::all();
     }
-    let mut set = BackendSet::none();
     if let Some(list) = &options.backends {
+        let mut set = BackendSet::none();
         for word in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             match word {
                 "wine" => set.insert(Backend::Wine),
@@ -537,11 +544,7 @@ fn resolve_backends(options: &Options) -> BackendSet {
         }
         return set;
     }
-    // A default that assumes Wine present and nothing else: Wine is the ordinary reason a
-    // Linux ARM64 machine can run a Windows image at all, and a native ARM64 binary still
-    // needs it for its NT syscalls.
-    set.insert(Backend::Wine);
-    set
+    compitum_router::discover().backend_set()
 }
 
 /// Records a static analysis observation, unless `--no-record` was passed.

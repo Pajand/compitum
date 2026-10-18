@@ -70,11 +70,13 @@
 // wrong example on a crate page is worse than no example at all.
 #![doc = include_str!("../README.md")]
 
+pub mod discovery;
 pub mod engine;
 pub mod plan;
 pub mod reason;
 pub mod route;
 
+pub use discovery::{discover, BackendProbe, Discovery, Found};
 pub use engine::{decide, Request, Subject};
 pub use plan::{Plan, SCHEMA_VERSION};
 pub use reason::{Reason, ReasonCode, Reasons, Severity};

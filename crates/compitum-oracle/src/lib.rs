@@ -89,6 +89,8 @@
 
 pub mod ledger;
 pub mod record;
+pub mod store;
 
 pub use ledger::{default_path, Ledger, LedgerError, LoadStats, RecordAction};
 pub use record::{identify, HostSnapshot, Outcome, Provenance, Record, RECORD_SCHEMA_VERSION};
+pub use store::{default_data_root, BoundaryError, Store, StoreBoundary};
