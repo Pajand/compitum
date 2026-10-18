@@ -2,8 +2,9 @@
 
 **Date:** 2026-10-18
 **Status:** measured on the development device
-**Verdict:** the execution bridge is **already partly working**, and the gap is a known,
-dated one rather than an open research problem.
+**Verdict:** the execution bridge is **already partly working and now verified end to end**
+for native ARM64 — six of six routing predictions matched observation. The remaining gap is
+ARM64EC, and it is a dated version floor rather than an open research problem.
 
 ---
 
@@ -141,19 +142,117 @@ Option 2 is the roadmap's original plan and remains the right one — but it is 
 
 ## How to reproduce
 
-```console
-# Ubuntu environment (glibc, which is what Wine targets)
-$ cp crates/compitum-pe/tests/corpus/real-console-4k.exe /tmp/
-$ timeout 15 wine /tmp/real-console-4k.exe; echo "exit: $?"
-exit: 124      # still running, therefore executed
+The full prediction-versus-measurement comparison:
 
-# Control: a non-PE file must be refused
-$ printf 'not a PE' > /tmp/notpe.exe
-$ wine /tmp/notpe.exe; echo "exit: $?"
-exit: 47
+```console
+$ sh tools/loopcheck.sh <path-to-compitum> <path-to-corpus>
+initialising the Wine prefix once (its setup cost would otherwise swamp the measurement)
+binary                   predicted          observed          verdict
+chpe-arm64ec.exe         fex_partial        not-running(+0)   AGREE
+chpe-arm64x.exe          pick_native_slice  executing(+420)   AGREE
+real-arm64ec.exe         fex_full           not-running(+0)   AGREE
+real-console-16k.exe     native             executing(+423)   AGREE
+real-console-4k.exe      native             executing(+422)   AGREE
+real-gui-4k.exe          native             executing(+422)   AGREE
+
+agreements: 6    disagreements: 0    extraction failures: 0
+VERDICT: all 6 prediction(s) matched observation
+```
+
+A single file, by hand, showing why the exit code is not the evidence:
+
+```console
+$ WINEPREFIX=/tmp/wp wine /path/to/real-console-4k.exe &
+$ # after 4 s, sum utime+stime for the matching process; then again 4 s later
+# ARM64, infinite loop : +456 jiffies  -> executing
+# x86-64, cannot run   :  +18 jiffies  -> not executing
 ```
 
 ---
+
+## A measurement error worth recording
+
+The first version of `tools/loopcheck.sh` treated a timeout exit code (124) as proof that a
+program had executed. **It is not.** A program that hangs also times out. That produced a false
+agreement:
+
+```
+chpe-arm64ec.exe   predicted fex_partial   observed executed   verdict unexpected-success
+```
+
+An x86-64 binary, which Wine on ARM64 cannot execute without FEX, was recorded as having
+executed — so the loop check appeared to contradict COMPITUM's own prediction when in fact the
+*measurement* was wrong.
+
+Three defects were found in the script, in increasing order of seriousness:
+
+**1. The JSON pattern never matched.** The CLI emits pretty-printed output:
+
+```text
+  "route": "native"
+```
+
+while the pattern expected `"route":"native"` with no space. Every prediction silently became
+`unknown`. Fixed by tolerating arbitrary whitespace, and by treating a missing prediction as a
+fatal error rather than filling in a placeholder.
+
+**2. The script reported success having measured nothing.** With zero predictions it printed
+`VERDICT: every prediction matched observation`. A check that passes having verified nothing is
+worse than no check, because it converts an absence of evidence into apparent evidence — the
+exact failure mode this project exists to eliminate. It now refuses to pass unless at least one
+comparison was actually made.
+
+**3. Exit code cannot distinguish executing from hanging.** The substantive error, and the one
+worth generalising from.
+
+### Finding the right discriminator
+
+Claimed CPU time was the obvious candidate and it was also wrong: Wine's first-run prefix
+initialisation runs `rundll32 setupapi,InstallHinfSection`, which burns over 1500 jiffies on its
+own — more than any program being measured. That is what made the x86-64 binary look busy.
+
+Measuring in an already-initialised prefix separates the two cases cleanly:
+
+| Program | CPU growth over 4 s | Interpretation |
+|---|---|---|
+| ARM64 binary, infinite loop (`b .`) | **+456 jiffies** | executing |
+| x86-64 binary, cannot run | **+18 jiffies** | not executing |
+
+The discriminator is therefore **CPU growth across two windows**, not a single total and not an
+exit code. A program that is running accumulates CPU steadily; one that is blocked, refused, or
+parked on a dialog does not.
+
+The threshold is 150 jiffies, which sits far from both observations — 8× above the blocked case
+and 3× below the executing case, so ordinary jitter cannot flip a verdict.
+
+### The result, after the correction
+
+```text
+binary                   predicted          observed          verdict
+chpe-arm64ec.exe         fex_partial        not-running(+0)   AGREE
+chpe-arm64x.exe          pick_native_slice  executing(+420)   AGREE
+real-arm64ec.exe         fex_full           not-running(+0)   AGREE
+real-console-16k.exe     native             executing(+423)   AGREE
+real-console-4k.exe      native             executing(+422)   AGREE
+real-gui-4k.exe          native             executing(+422)   AGREE
+
+agreements: 6    disagreements: 0    extraction failures: 0
+```
+
+**The separation is qualitative, not marginal.** Every file the router said would execute
+executed, and every file it said would not, did not. That is the project's central claim,
+verified end to end against real binaries and a real Wine.
+
+### The generalisable lesson
+
+Two of the three defects were cases where a check **appeared to succeed because it had not
+actually measured anything**. Both this project's most valuable findings — the PE header offsets
+and the CHPE identification — were of the same shape: a system agreeing with itself.
+
+> A check must be able to distinguish "verified true" from "not verified at all", and must
+> never report the second as the first.
+
+The 150-jiffie threshold and the zero-comparison guard are both instances of that rule.
 
 ## What this does *not* claim
 

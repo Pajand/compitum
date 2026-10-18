@@ -134,7 +134,8 @@ MIN_LOAD_CONFIG_FOR_CHPE = 0xD0
 # was during development when the code-map RVA did not resolve.
 # ---------------------------------------------------------------------------
 
-def build_chpe_fixture(machine: int, chpe_version: int, code_map_types: list) -> bytes:
+def build_chpe_fixture(machine: int, chpe_version: int, code_map_types: list,
+                       entry_code: bytes = b"") -> bytes:
     """
     Builds a PE32+ image carrying CHPE metadata of the given version.
 
@@ -145,6 +146,11 @@ def build_chpe_fixture(machine: int, chpe_version: int, code_map_types: list) ->
     CHPEMetadataPointer is written as a VIRTUAL ADDRESS, not an RVA. Reading it as an RVA
     is a documented mistake and lands in the wrong place on every image whose base is not
     zero, which is every real image.
+
+    `entry_code` is placed at the entry point. Passing an infinite loop written in the
+    machine's own instruction set makes the fixture genuinely executable, which is what lets
+    the loop check in `tools/loopcheck.sh` compare a routing prediction against an execution
+    rather than against a header.
     """
     section_align = 0x1000
     file_align = 0x200
@@ -175,6 +181,11 @@ def build_chpe_fixture(machine: int, chpe_version: int, code_map_types: list) ->
     struct.pack_into("<H", data, opt + OFF_SUBSYSTEM, 3)  # console
     struct.pack_into("<I", data, opt + OFF_RVA_AND_SIZES_PE32PLUS, 16)
 
+    # AddressOfEntryPoint, at its documented offset. Without this the loader jumps to the
+    # image base rather than to code, which faults instead of executing.
+    if entry_code:
+        struct.pack_into("<I", data, opt + 0x10, section_align)
+
     data_directory = opt + OFF_DATA_DIRECTORY
     load_config_rva = section_align + 0x100
     struct.pack_into("<II", data, data_directory + 10 * 8,
@@ -190,6 +201,10 @@ def build_chpe_fixture(machine: int, chpe_version: int, code_map_types: list) ->
 
     def file_offset(rva: int) -> int:
         return raw_offset + (rva - section_align)
+
+    if entry_code:
+        start = file_offset(section_align)
+        data[start:start + len(entry_code)] = entry_code
 
     metadata_rva = section_align + 0x200
     code_map_rva = section_align + 0x400
@@ -380,15 +395,19 @@ def main() -> int:
         #
         # ARM64EC: an x86-64 machine type plus version-1 metadata. This is the case machine
         # type alone cannot identify, because the header is identical to plain x86-64.
-        ("chpe-arm64ec.exe", 0x8664, 1, [0, 0, 1], "COFF-ARM64EC"),
-        # ARM64X: an ARM64 machine type plus version-2 metadata.
-        ("chpe-arm64x.exe", 0xAA64, 2, [0, 1, 0, 1], "COFF-ARM64X"),
+        # x86-64 `jmp $`: an infinite loop in the instruction set this machine field
+        # declares. Wine on ARM64 cannot run x86-64 without FEX, so a refusal is the correct
+        # outcome and confirms the `fex_partial` prediction rather than contradicting it.
+        ("chpe-arm64ec.exe", 0x8664, 1, [0, 0, 1], "COFF-ARM64EC", b"\xEB\xFE"),
+        # ARM64 `b .`: an infinite loop in ARM64, matching this machine field. Wine executes
+        # it natively, which is what the `pick_native_slice` prediction claims.
+        ("chpe-arm64x.exe", 0xAA64, 2, [0, 1, 0, 1], "COFF-ARM64X", b"\x00\x00\x00\x14"),
     ]
 
-    for name, machine, version, code_map, expected_format in chpe_cases:
+    for name, machine, version, code_map, expected_format, entry_code in chpe_cases:
         out = os.path.join(CORPUS, name)
         with open(out, "wb") as handle:
-            handle.write(build_chpe_fixture(machine, version, code_map))
+            handle.write(build_chpe_fixture(machine, version, code_map, entry_code))
 
         verdict = llvm_says(out)
         if verdict["errors"]:

@@ -464,9 +464,50 @@ roadmap originally planned for. Full measurements and reproduction steps are in
 | # | Task | Status |
 |---|---|---|
 | 1.1 | Native ARM64 execution under Wine | ✅ **met** — measured, documented |
-| 1.2 | ARM64EC hybrid execution | ⬜ needs Wine ≥ 8.21, or a `proton-wine` build |
-| 1.3 | NT syscall translation beyond startup | ⬜ untested; needs a binary that makes calls |
-| 1.4 | End-to-end `NATIVE` proof from the CLI | ⬜ the router already decides it; execution now follows |
+| 1.2 | **Prediction matched observation, end to end** | ✅ **met** — 6 of 6, `tools/loopcheck.sh` |
+| 1.3 | ARM64EC hybrid execution | ⬜ needs Wine ≥ 8.21, or a `proton-wine` build |
+| 1.4 | NT syscall translation beyond process startup | ⬜ untested; needs a binary that makes calls |
+
+**Task 1.2 is the one that matters, and it is the project's central claim.** It is no longer
+asserted; it is measured:
+
+```text
+binary                   predicted          observed          verdict
+chpe-arm64ec.exe         fex_partial        not-running(+0)   AGREE
+chpe-arm64x.exe          pick_native_slice  executing(+420)   AGREE
+real-arm64ec.exe         fex_full           not-running(+0)   AGREE
+real-console-16k.exe     native             executing(+423)   AGREE
+real-console-4k.exe      native             executing(+422)   AGREE
+real-gui-4k.exe          native             executing(+422)   AGREE
+
+agreements: 6    disagreements: 0    extraction failures: 0
+```
+
+Every file the router said would execute executed; every file it said would not, did not. The
+separation is qualitative — `+0` against `+420` — not marginal.
+
+**Three defects were found in the check itself before it could be trusted**, all in
+`tools/loopcheck.sh`, and the pattern is worth naming because it is the same one that exposed
+both of this phase's major errors:
+
+1. A JSON pattern that never matched, so every prediction silently became `unknown`.
+2. A script that printed *"every prediction matched observation"* having made **zero**
+   predictions. A check that passes having verified nothing is worse than no check, because it
+   turns an absence of evidence into apparent evidence. It now refuses to pass unless at least
+   one comparison was made.
+3. **Exit code cannot distinguish executing from hanging.** The substantive error. A timeout
+   means "still running", which a hung process also achieves, so an x86-64 binary that Wine
+   cannot execute was recorded as *executing* and appeared to contradict the router.
+
+Claimed CPU time was the next candidate and was also wrong: Wine's first-run prefix
+initialisation burns over 1500 jiffies on its own. Measured in an already-initialised prefix,
+the two cases separate cleanly — **+456 jiffies for the executing ARM64 binary against +18 for
+the x86-64 one** — so the discriminator is now CPU growth across two windows, with a threshold
+8× above one observation and 3× below the other.
+
+> **The generalisable lesson.** A check must distinguish "verified true" from "not verified at
+> all", and must never report the second as the first. Every major finding in this project has
+> had the same shape: a system agreeing with itself, or claiming a result it had not measured.
 
 ---
 
