@@ -1,0 +1,215 @@
+name: CI
+
+# Every push and pull request runs the same gate. The point is not ceremony: a portability
+# tool that silently regresses produces confident wrong answers, so this gate is the only
+# thing standing between a change and a false verdict being recorded in the Oracle.
+#
+# Checks with real content live in `.github/scripts/` rather than inline, so they can be run
+# locally against the same fixtures.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The workspace has no third-party dependencies, so the build must never reach the network.
+  # Enforcing it here turns "zero dependencies" from a promise into a build failure.
+  CARGO_NET_OFFLINE: "true"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The primary gate: build and test on ARM64, the architecture this project exists
+  # for and the one whose behaviour cannot be simulated by testing elsewhere.
+  # ---------------------------------------------------------------------------
+  test-arm64:
+    name: build and test (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Report the toolchain and the host
+        run: |
+          rustc --version
+          cargo --version
+          uname -m
+          getconf PAGESIZE
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --release --all-targets
+
+      - name: Test
+        run: cargo test --release --all-targets
+
+      - name: Confirm no third-party crate entered the dependency graph
+        run: |
+          cargo metadata --format-version 1 | python3 .github/scripts/check_dependencies.py
+
+      - name: Prove the CLI runs on this machine
+        run: |
+          ./target/release/compitum host
+          ./target/release/compitum host --json > /tmp/host.json
+          python3 .github/scripts/check_host.py /tmp/host.json aarch64
+
+      - name: Exercise the routing path on real files
+        run: |
+          cargo run --release -p compitum-pe --example write_fixture -- /tmp/fixtures
+          export COMPITUM_LEDGER=/tmp/ci-ledger.jsonl
+          rm -f "$COMPITUM_LEDGER"
+          BIN=./target/release/compitum
+
+          # A pure ARM64 image must route native, with no translator involved.
+          "$BIN" verify /tmp/fixtures/native-arm64.exe --backends wine,fex --json > /tmp/native.json
+          python3 .github/scripts/check_routing.py /tmp/native.json native
+
+          # An ARM64X fat image must select the native slice rather than the hybrid path.
+          "$BIN" verify /tmp/fixtures/fat-arm64x.exe --backends wine --json > /tmp/fat.json
+          python3 .github/scripts/check_routing.py /tmp/fat.json pick_native_slice
+
+          # An ARM64EC image must route hybrid, and must name FEX rather than Box64.
+          "$BIN" verify /tmp/fixtures/hybrid-arm64ec.exe --backends wine,fex --json > /tmp/hybrid.json
+          python3 .github/scripts/check_routing.py /tmp/hybrid.json fex_partial
+
+          # An x86-64 image must route to full translation.
+          "$BIN" verify /tmp/fixtures/legacy-x86_64.exe --backends wine,box64 --json > /tmp/x64.json
+          python3 .github/scripts/check_routing.py /tmp/x64.json box64_full
+
+      - name: The exit-code contract must hold
+        run: |
+          BIN=./target/release/compitum
+          export COMPITUM_LEDGER=/tmp/ci-ledger.jsonl
+
+          expect_code() {
+            set +e
+            "$@" >/dev/null 2>&1
+            actual=$?
+            set -e
+            if [ "$actual" != "$1" ]; then :; fi
+          }
+
+          # 0: succeeded and the verdict was favourable.
+          set +e
+          "$BIN" verify /tmp/fixtures/native-arm64.exe --backends wine >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" != "0" ]; then echo "::error::a runnable subject must exit 0, got $code"; exit 1; fi
+
+          # 2: the command ran, and the verdict was unfavourable. This is an ANSWER, not an error.
+          set +e
+          "$BIN" verify /tmp/fixtures/needs-sve-sme.exe --backends wine >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" != "2" ]; then echo "::error::an un-runnable subject must exit 2, got $code"; exit 1; fi
+
+          # 1: the command could not be carried out. This is the tool FAILING to answer.
+          set +e
+          "$BIN" verify /this/does/not/exist.exe >/dev/null 2>&1
+          code=$?
+          set -e
+          if [ "$code" != "1" ]; then echo "::error::an unreadable path must exit 1, got $code"; exit 1; fi
+
+          echo "exit-code contract holds: 0 favourable, 2 unfavourable, 1 could not answer"
+
+      - name: Confirm the ledger recorded real decisions, not guesses
+        run: python3 .github/scripts/check_ledger.py /tmp/ci-ledger.jsonl
+
+  # ---------------------------------------------------------------------------
+  # A build on x86_64, to catch a mistake that would only surface on a developer
+  # machine that is not the target architecture. The tool is meant to run on a
+  # foreign host to inspect foreign binaries, so it must at least build and report
+  # sensibly there.
+  # ---------------------------------------------------------------------------
+  build-x86_64:
+    name: build and report (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build
+        run: cargo build --release --all-targets
+
+      - name: The host report must be honest about being a foreign architecture
+        run: |
+          ./target/release/compitum host --json > /tmp/host.json
+          python3 .github/scripts/check_host.py /tmp/host.json x86_64
+
+      - name: Inspecting a binary for another architecture must still work
+        run: |
+          cargo run --release -p compitum-pe --example write_fixture -- /tmp/fixtures
+          ./target/release/compitum inspect /tmp/fixtures/native-arm64.exe --json > /tmp/i.json
+          python3 -c "import json; d=json.load(open('/tmp/i.json')); assert d['abi_family'] == 'arm64', d['abi_family']; print('family:', d['abi_family'])"
+
+  # ---------------------------------------------------------------------------
+  # The translation surface must stay usable. A locale is a data file, so it can be
+  # validated without a human reading it.
+  # ---------------------------------------------------------------------------
+  locales:
+    name: translation catalogs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Every shipped locale must parse and report its coverage
+        run: python3 .github/scripts/check_locales.py ./target/release/compitum
+
+      - name: The English base must be complete and consistent
+        run: |
+          cargo test -p compitum-i18n
+          ./target/release/compitum locales export en > /tmp/template.json
+          python3 .github/scripts/check_template.py /tmp/template.json
+
+  # ---------------------------------------------------------------------------
+  # Release hygiene. The metadata every registry requires must be present before a
+  # publish is attempted, because a rejected publish cannot be undone and burns the
+  # version number.
+  # ---------------------------------------------------------------------------
+  package-metadata:
+    name: package metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Every crate must be packageable
+        run: |
+          # `cargo package` performs the same validation a registry does, so a failure here
+          # is far cheaper than a rejected publish.
+          for crate in compitum-json compitum-digest compitum-i18n compitum-isa \
+                       compitum-pe compitum-router compitum-oracle compitum-cli; do
+            echo "--- $crate"
+            cargo package -p "$crate" --no-verify --allow-dirty
+          done
+
+      - name: No credential-shaped strings in the tree
+        run: python3 .github/scripts/check_secrets.py .

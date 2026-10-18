@@ -22,13 +22,13 @@ authors = ["The COMPITUM Project"]
 description = "ABI-aware ARM64 compatibility layer: classify, verify, route."
 
 [workspace.dependencies]
-compitum-json = { path = "crates/compitum-json" }
-compitum-digest = { path = "crates/compitum-digest" }
-compitum-i18n = { path = "crates/compitum-i18n" }
-compitum-isa = { path = "crates/compitum-isa" }
-compitum-pe = { path = "crates/compitum-pe" }
-compitum-router = { path = "crates/compitum-router" }
-compitum-oracle = { path = "crates/compitum-oracle" }
+compitum-json = { version = "0.1.0", path = "crates/compitum-json" }
+compitum-digest = { version = "0.1.0", path = "crates/compitum-digest" }
+compitum-i18n = { version = "0.1.0", path = "crates/compitum-i18n" }
+compitum-isa = { version = "0.1.0", path = "crates/compitum-isa" }
+compitum-pe = { version = "0.1.0", path = "crates/compitum-pe" }
+compitum-router = { version = "0.1.0", path = "crates/compitum-router" }
+compitum-oracle = { version = "0.1.0", path = "crates/compitum-oracle" }
 
 # Zero external dependencies, by design. See ROADMAP Law 5: the workspace must build
 # offline and stay trivially auditable.

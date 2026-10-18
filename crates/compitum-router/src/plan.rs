@@ -139,11 +139,9 @@ impl Plan {
                  translated to AArch64."
                     .to_owned()
             }
-            Route::FexFull => {
-                "Runs translated: this is an x86-64 image, so every instruction is \
+            Route::FexFull => "Runs translated: this is an x86-64 image, so every instruction is \
                  translated to AArch64."
-                    .to_owned()
-            }
+                .to_owned(),
             Route::Wow64 => {
                 "Runs translated in 32-bit mode: this image additionally requires a WOW64 \
                  compatibility environment."
@@ -222,7 +220,14 @@ impl Plan {
             )
             .with("headline", self.headline())
             .with("blocking_reason_count", self.reasons.blocking().len())
-            .with("caution_count", self.reasons.items().iter().filter(|r| r.severity == Severity::Caution).count())
+            .with(
+                "caution_count",
+                self.reasons
+                    .items()
+                    .iter()
+                    .filter(|r| r.severity == Severity::Caution)
+                    .count(),
+            )
             .with("reasons", reasons_json)
             .into()
     }
@@ -279,9 +284,7 @@ mod tests {
     fn confidence_is_the_weakest_reason() {
         let mut reasons = Reasons::new();
         reasons.push(Reason::new(ReasonCode::ArchitectureNative));
-        reasons.push(
-            Reason::new(ReasonCode::IsaEvidenceWeak).confidence(Confidence::MEDIUM),
-        );
+        reasons.push(Reason::new(ReasonCode::IsaEvidenceWeak).confidence(Confidence::MEDIUM));
         let plan = Plan::new(Route::Native, reasons, None);
         assert_eq!(plan.confidence, Confidence::MEDIUM);
     }
@@ -302,7 +305,9 @@ mod tests {
     fn headline_for_native_mentions_no_translation() {
         let headline = native_plan().headline();
         assert!(headline.contains("natively"));
-        assert!(headline.contains("no instruction is translated") || headline.contains("translated"));
+        assert!(
+            headline.contains("no instruction is translated") || headline.contains("translated")
+        );
     }
 
     #[test]
@@ -393,7 +398,9 @@ mod tests {
 
     #[test]
     fn throughput_is_present_for_runnable_plans_and_absent_for_refusals() {
-        assert!(native_plan().to_json()["expected_throughput_percent"].as_object().is_some());
+        assert!(native_plan().to_json()["expected_throughput_percent"]
+            .as_object()
+            .is_some());
         let refused = Plan::refused(Reason::new(ReasonCode::ArchitectureUnsupported), None);
         assert!(refused.to_json()["expected_throughput_percent"].is_null());
     }

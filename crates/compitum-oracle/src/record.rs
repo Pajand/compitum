@@ -366,7 +366,12 @@ impl Record {
 
     /// Records an observed execution outcome.
     #[must_use]
-    pub fn with_outcome(mut self, outcome: Outcome, provenance: Provenance, note: Option<String>) -> Self {
+    pub fn with_outcome(
+        mut self,
+        outcome: Outcome,
+        provenance: Provenance,
+        note: Option<String>,
+    ) -> Self {
         self.outcome = outcome;
         self.provenance = provenance;
         self.note = note;
@@ -582,10 +587,15 @@ mod tests {
 
     #[test]
     fn outcome_markers_are_distinct() {
-        let markers: Vec<char> = [Outcome::Success, Outcome::Partial, Outcome::Failure, Outcome::Unknown]
-            .iter()
-            .map(|o| o.marker())
-            .collect();
+        let markers: Vec<char> = [
+            Outcome::Success,
+            Outcome::Partial,
+            Outcome::Failure,
+            Outcome::Unknown,
+        ]
+        .iter()
+        .map(|o| o.marker())
+        .collect();
         let unique: std::collections::BTreeSet<char> = markers.iter().copied().collect();
         assert_eq!(unique.len(), 4);
     }
@@ -597,7 +607,11 @@ mod tests {
         assert_eq!(a.class_tag(), b.class_tag(), "order must not matter");
 
         let c = host_with(&["fp", "asimd"]);
-        assert_ne!(a.class_tag(), c.class_tag(), "a missing feature must change the class");
+        assert_ne!(
+            a.class_tag(),
+            c.class_tag(),
+            "a missing feature must change the class"
+        );
 
         // Page size is a real compatibility axis and must affect the class.
         let mut d = a.clone();
@@ -634,10 +648,16 @@ mod tests {
         .with_outcome(Outcome::Success, Provenance::ObservedExecution, None);
 
         let better = host_with(&["fp", "asimd", "sve2"]);
-        assert!(record.applies_to(&better), "a superset host must inherit a success");
+        assert!(
+            record.applies_to(&better),
+            "a superset host must inherit a success"
+        );
 
         let worse = host_with(&["asimd"]);
-        assert!(!record.applies_to(&worse), "a host missing a required feature must not");
+        assert!(
+            !record.applies_to(&worse),
+            "a host missing a required feature must not"
+        );
     }
 
     #[test]
@@ -770,7 +790,10 @@ mod tests {
             0,
         );
         assert_eq!(record.outcome, Outcome::Unknown);
-        assert!(!record.applies_to(&host), "an undetermined record answers nothing");
+        assert!(
+            !record.applies_to(&host),
+            "an undetermined record answers nothing"
+        );
     }
 
     #[test]
@@ -789,7 +812,11 @@ mod tests {
             host,
             1_700_000_000,
         )
-        .with_outcome(Outcome::Partial, Provenance::ObservedExecution, Some("sound missing".to_owned()));
+        .with_outcome(
+            Outcome::Partial,
+            Provenance::ObservedExecution,
+            Some("sound missing".to_owned()),
+        );
 
         let json = original.to_json();
         let restored = Record::from_json(&json).expect("must round-trip");
@@ -912,7 +939,7 @@ mod tests {
         )
         .with_outcome(Outcome::Success, Provenance::ObservedExecution, None);
         let line = record.summary_line();
-        assert!(line.contains("Y"));
+        assert!(line.contains('Y'));
         assert!(line.contains("arm64"));
         assert!(line.contains("native"));
         assert!(line.contains("tool.exe"));

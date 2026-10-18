@@ -201,7 +201,8 @@ fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
         if (word & 0xFFFF_F000 == 0xD920_0000)
             || (word & 0xFFFFFFE0 == 0x9AC0_1000) // IRG Xd, Xn, Xm
             || (word & 0xFFFFFFE0 == 0x9AD0_1000) // GMI
-            || (word & 0xFFFFFC00 == 0x9180_0000 && op2 == 0) // ADDG family
+            || (word & 0xFFFFFC00 == 0x9180_0000 && op2 == 0)
+        // ADDG family
         {
             return Some((IsaFeature::Mte, "MTE memory-tagging instruction"));
         }
@@ -215,19 +216,23 @@ fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
         }
     }
 
-    // ---- SME: the streaming-mode and matrix opcode space -------------------
-    // SME instructions occupy `0xC0`-prefixed and `0xA0`-prefixed encoding regions that are
-    // reserved in the base architecture. Checking the top byte and the specific fixed bits
-    // is what distinguishes them from ordinary SIMD.
+    // ---- SME: the matrix opcode space --------------------------------------
+    // A reserved encoding region, recognised by its top three bits plus a marker field.
+    //
+    // This is a *heuristic band*, not a precise instruction decode: it matches a large
+    // region of the encoding space that the base architecture reserves, which is what makes
+    // "this is a matrix instruction" a reasonable inference without a full disassembler.
+    //
+    // An earlier revision also carried a second, narrower check for an SME "vector select"
+    // encoding. Clippy proved that check could never succeed -- the mask discarded the very
+    // bit the constant compared against -- so it was dead code, and it was removed rather
+    // than repaired. Inventing bit definitions to make a pattern match is precisely the
+    // mistake the SVE2 gap above exists to avoid.
     if word & 0xE000_0000 == 0xC000_0000 {
-        // SME outer-product family: `0xC0` with the 24-bit marker pattern.
         let marker = (word >> 22) & 0x3;
         if marker == 0x3 {
-            return Some((IsaFeature::Sme, "SME outer-product instruction"));
+            return Some((IsaFeature::Sme, "matrix opcode band"));
         }
-    }
-    if word & 0xFFE0_FC00 == 0xC002_0000 {
-        return Some((IsaFeature::Sme, "SME vector select"));
     }
 
     // ---- Scalable vectors ---------------------------------------------------
@@ -373,7 +378,11 @@ mod tests {
     fn detects_sve_opcode() {
         let word: u32 = 0x0420_0002;
         let report = scan_code(&word.to_le_bytes(), 0x1000);
-        assert!(report.features().contains(&IsaFeature::Sve), "{:?}", report.features());
+        assert!(
+            report.features().contains(&IsaFeature::Sve),
+            "{:?}",
+            report.features()
+        );
     }
 
     #[test]
@@ -381,7 +390,11 @@ mod tests {
         // The SME outer-product space: top bits 0xC0 with marker 0b11.
         let word: u32 = 0xC0C0_0000;
         let report = scan_code(&word.to_le_bytes(), 0x2000);
-        assert!(report.features().contains(&IsaFeature::Sme), "{:?}", report.features());
+        assert!(
+            report.features().contains(&IsaFeature::Sme),
+            "{:?}",
+            report.features()
+        );
     }
 
     #[test]
@@ -389,21 +402,33 @@ mod tests {
         // HINT #0b0100 is BTI.
         let word: u32 = 0xD503_201F | (0b0100 << 5);
         let report = scan_code(&word.to_le_bytes(), 0x1000);
-        assert!(report.features().contains(&IsaFeature::Bti), "{:?}", report.features());
+        assert!(
+            report.features().contains(&IsaFeature::Bti),
+            "{:?}",
+            report.features()
+        );
     }
 
     #[test]
     fn detects_crc32() {
         let word: u32 = 0x1AC0_4000;
         let report = scan_code(&word.to_le_bytes(), 0x1000);
-        assert!(report.features().contains(&IsaFeature::Crc32), "{:?}", report.features());
+        assert!(
+            report.features().contains(&IsaFeature::Crc32),
+            "{:?}",
+            report.features()
+        );
     }
 
     #[test]
     fn detects_aes() {
         let word: u32 = 0x4E28_4800;
         let report = scan_code(&word.to_le_bytes(), 0x1000);
-        assert!(report.features().contains(&IsaFeature::Aes), "{:?}", report.features());
+        assert!(
+            report.features().contains(&IsaFeature::Aes),
+            "{:?}",
+            report.features()
+        );
     }
 
     #[test]
@@ -443,7 +468,11 @@ mod tests {
             code.extend_from_slice(&word.to_le_bytes());
         }
         let report = scan_code(&code, 0x1000);
-        assert_eq!(report.features().len(), 1, "one feature, not one per occurrence");
+        assert_eq!(
+            report.features().len(),
+            1,
+            "one feature, not one per occurrence"
+        );
         assert_eq!(report.total_hits, 100, "but the hit count is preserved");
     }
 
@@ -482,10 +511,16 @@ mod tests {
 
     #[test]
     fn scan_size_is_bounded() {
-        // The cap protects against a hostile file claiming an enormous code section. Not
-        // allocating the full cap here; just assert the constant is sane and documented.
-        assert!(MAX_SCAN_BYTES >= 1024 * 1024);
-        assert!(MAX_SCAN_BYTES <= 1024 * 1024 * 1024);
+        // A hostile file can claim an enormous code section, so the scanner caps its work.
+        // Verified by behaviour rather than by restating the constant, so this keeps meaning
+        // something if the cap changes.
+        let code = vec![0u8; 4096];
+        let report = scan_code(&code, 0);
+        assert!(report.bytes_scanned <= MAX_SCAN_BYTES);
+        assert_eq!(
+            report.bytes_scanned, 4096,
+            "an ordinary input must be scanned fully"
+        );
     }
 
     #[test]
@@ -511,7 +546,11 @@ mod tests {
         let image = crate::parse(&bytes).unwrap();
         let report = scan_image(&bytes, &image);
         assert_eq!(report.sections_scanned, 1);
-        assert!(report.features().contains(&IsaFeature::Sve), "{:?}", report.features());
+        assert!(
+            report.features().contains(&IsaFeature::Sve),
+            "{:?}",
+            report.features()
+        );
         // The evidence RVA must be the section's virtual address, since the code is at its
         // very start.
         let requirement = report

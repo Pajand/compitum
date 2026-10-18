@@ -394,7 +394,6 @@ impl FromIterator<Requirement> for RequirementSet {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,7 +516,12 @@ mod tests {
     fn feature_set_discards_provenance() {
         let mut set = RequirementSet::new();
         set.require(IsaFeature::Sve2, RequirementSource::Metadata, None, "a");
-        set.require(IsaFeature::Sme, RequirementSource::InstructionScan, None, "b");
+        set.require(
+            IsaFeature::Sme,
+            RequirementSource::InstructionScan,
+            None,
+            "b",
+        );
         assert_eq!(set.feature_set().len(), 2);
     }
 
@@ -525,16 +529,34 @@ mod tests {
     fn weakest_confidence_reports_the_floor() {
         let mut set = RequirementSet::new();
         set.require(IsaFeature::Sve2, RequirementSource::Metadata, None, "a");
-        set.require(IsaFeature::Mte, RequirementSource::InstructionScan, None, "b");
+        set.require(
+            IsaFeature::Mte,
+            RequirementSource::InstructionScan,
+            None,
+            "b",
+        );
         assert_eq!(set.weakest_confidence(), Confidence::MEDIUM);
-        assert_eq!(RequirementSet::new().weakest_confidence(), Confidence::CERTAIN);
+        assert_eq!(
+            RequirementSet::new().weakest_confidence(),
+            Confidence::CERTAIN
+        );
     }
 
     #[test]
     fn sort_is_by_confidence_then_feature() {
         let mut set = RequirementSet::new();
-        set.require(IsaFeature::Mte, RequirementSource::InstructionScan, None, "weak");
-        set.require(IsaFeature::Sve2, RequirementSource::Metadata, None, "strong");
+        set.require(
+            IsaFeature::Mte,
+            RequirementSource::InstructionScan,
+            None,
+            "weak",
+        );
+        set.require(
+            IsaFeature::Sve2,
+            RequirementSource::Metadata,
+            None,
+            "strong",
+        );
         set.sort();
         assert_eq!(set.items()[0].feature, IsaFeature::Sve2);
         assert_eq!(set.items()[1].feature, IsaFeature::Mte);
@@ -579,8 +601,12 @@ mod tests {
 
     #[test]
     fn display_includes_provenance() {
-        let requirement =
-            Requirement::new(IsaFeature::Sme, RequirementSource::InstructionScan, None, "x");
+        let requirement = Requirement::new(
+            IsaFeature::Sme,
+            RequirementSource::InstructionScan,
+            None,
+            "x",
+        );
         let text = requirement.to_string();
         assert!(text.contains("sme"));
         assert!(text.contains("instruction_scan"));

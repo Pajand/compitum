@@ -48,14 +48,21 @@ pub fn render_host(host: &HostProfile, translator: &Translator, json: bool) -> S
     out.push_str(&heading(&translator.text("section.host")));
     out.push_str(&field(&translator.text("field.arch"), &host.arch));
     out.push_str(&field(&translator.text("field.cores"), host.cpu_count));
-    out.push_str(&field(&translator.text("field.page_size"), format!("{} bytes", host.page_size)));
+    out.push_str(&field(
+        &translator.text("field.page_size"),
+        format!("{} bytes", host.page_size),
+    ));
     out.push_str(&field(&translator.text("field.kernel"), &host.kernel));
     out.push_str(&field("hwcap", format!("0x{:016x}", host.raw_hwcap)));
     out.push_str(&field("hwcap2", format!("0x{:016x}", host.raw_hwcap2)));
 
     out.push_str(&heading(&translator.text("section.capabilities")));
     let present: Vec<&str> = host.features.iter().map(|f| f.id()).collect();
-    out.push_str(&format!("  {} features: {}\n", present.len(), present.join(" ")));
+    out.push_str(&format!(
+        "  {} features: {}\n",
+        present.len(),
+        present.join(" ")
+    ));
 
     // Call out the features that actually change a routing decision, and just as importantly
     // the ones that are absent. "SVE2 and SME are missing" is the single most useful sentence
@@ -115,7 +122,10 @@ pub fn render_inspect(
     let mut out = String::new();
     out.push_str(&format!("{} — {}\n", translator.text("app.name"), label));
     out.push_str(&heading(&translator.text("section.binary")));
-    out.push_str(&field(&translator.text("field.size"), format!("{size} bytes")));
+    out.push_str(&field(
+        &translator.text("field.size"),
+        format!("{size} bytes"),
+    ));
     if let Some(digest) = digest {
         out.push_str(&field(&translator.text("field.sha256"), digest.to_hex()));
     }
@@ -127,10 +137,7 @@ pub fn render_inspect(
             image.coff.machine.short_name()
         ),
     ));
-    out.push_str(&field(
-        &translator.text("field.arch"),
-        image.family().id(),
-    ));
+    out.push_str(&field(&translator.text("field.arch"), image.family().id()));
     out.push_str(&field(
         &translator.text("field.subsystem"),
         format!(
@@ -150,14 +157,31 @@ pub fn render_inspect(
         },
     ));
     if let Some(page) = image.implied_page_size() {
-        out.push_str(&field(&translator.text("field.page_size"), format!("{page} bytes")));
+        out.push_str(&field(
+            &translator.text("field.page_size"),
+            format!("{page} bytes"),
+        ));
     }
-    out.push_str(&field("managed", if image.is_managed() { "yes (.NET)" } else { "no" }));
+    out.push_str(&field(
+        "managed",
+        if image.is_managed() {
+            "yes (.NET)"
+        } else {
+            "no"
+        },
+    ));
     out.push_str(&field(
         "headless",
-        if image.is_headless_capable() { "capable" } else { "needs a display" },
+        if image.is_headless_capable() {
+            "capable"
+        } else {
+            "needs a display"
+        },
     ));
-    out.push_str(&field("exec code", format!("{} bytes", image.executable_bytes())));
+    out.push_str(&field(
+        "exec code",
+        format!("{} bytes", image.executable_bytes()),
+    ));
 
     // The explanation of what this ABI family means is the most valuable output of the
     // command, so it is always shown, not gated behind --verbose.
@@ -183,7 +207,11 @@ pub fn render_inspect(
                 section.raw_offset,
                 section.raw_size,
                 if section.is_executable() { "X" } else { "-" },
-                if section.is_initialized_data() { "D" } else { "-" },
+                if section.is_initialized_data() {
+                    "D"
+                } else {
+                    "-"
+                },
             ));
         }
     }
@@ -215,19 +243,28 @@ pub fn inspect_json(
         .with("schema_version", 1u32)
         .with("subject_label", label)
         .with("subject_size", size)
-        .with("subject_sha256", digest.map(compitum_digest::Digest::to_hex))
+        .with(
+            "subject_sha256",
+            digest.map(compitum_digest::Digest::to_hex),
+        )
         .with("machine_raw", u64::from(image.coff.machine.raw()))
         .with("machine_name", image.coff.machine.canonical_name())
         .with("abi_family", image.family().id())
         .with("execution_semantics", image.family().execution_semantics())
         .with("subsystem", image.subsystem().id())
-        .with("subsystem_requires_display", image.subsystem().requires_display())
+        .with(
+            "subsystem_requires_display",
+            image.subsystem().requires_display(),
+        )
         .with("is_dll", image.coff.is_dll())
         .with("is_managed", image.is_managed())
         .with("headless_capable", image.is_headless_capable())
         .with("imports_graphics", image.imports_graphics())
         .with("executable_bytes", image.executable_bytes())
-        .with("implied_page_size", image.implied_page_size().map(u64::from))
+        .with(
+            "implied_page_size",
+            image.implied_page_size().map(u64::from),
+        )
         .with("arm64x_slices", image.has_arm64x_slices())
         .with("section_count", image.sections.len())
         .with("imports", imports);
@@ -269,7 +306,11 @@ pub fn render_plan(
     out.push_str(&heading(&translator.text("section.verdict")));
 
     // The verdict token is uppercase and column-stable so it can be grepped out of a CI log.
-    out.push_str(&format!("  {:<12} {}\n", translator.text("field.route"), plan.status_token()));
+    out.push_str(&format!(
+        "  {:<12} {}\n",
+        translator.text("field.route"),
+        plan.status_token()
+    ));
     out.push_str(&field("internal", plan.route.id()));
     out.push_str(&field(
         &translator.text("field.confidence"),
@@ -315,14 +356,24 @@ pub fn render_ledger_summary(summary: &Value, translator: &Translator, json: boo
         return to_pretty(summary) + "\n";
     }
     let mut out = String::new();
-    out.push_str(&format!("{} — {}\n", translator.text("app.name"), translator.text("cmd.oracle")));
+    out.push_str(&format!(
+        "{} — {}\n",
+        translator.text("app.name"),
+        translator.text("cmd.oracle")
+    ));
     out.push_str(&heading(&translator.text("section.details")));
-    out.push_str(&field("ledger", summary["ledger_path"].as_str().unwrap_or("(memory)")));
+    out.push_str(&field(
+        "ledger",
+        summary["ledger_path"].as_str().unwrap_or("(memory)"),
+    ));
     out.push_str(&field(
         &translator.text("field.records"),
         summary["total_records"].as_u64().unwrap_or(0),
     ));
-    out.push_str(&field("subjects", summary["distinct_subjects"].as_u64().unwrap_or(0)));
+    out.push_str(&field(
+        "subjects",
+        summary["distinct_subjects"].as_u64().unwrap_or(0),
+    ));
     out.push_str(&field(
         "determined",
         summary["determined_outcomes"].as_u64().unwrap_or(0),
@@ -358,7 +409,11 @@ pub fn render_ledger_summary(summary: &Value, translator: &Translator, json: boo
 
 /// Renders a table of ledger records.
 #[must_use]
-pub fn render_records(records: &[&compitum_oracle::Record], translator: &Translator, json: bool) -> String {
+pub fn render_records(
+    records: &[&compitum_oracle::Record],
+    translator: &Translator,
+    json: bool,
+) -> String {
     if json {
         let items: Vec<Value> = records.iter().map(|r| r.to_json()).collect();
         return to_pretty(&Value::from(items)) + "\n";
@@ -424,7 +479,10 @@ pub fn render_locales(
         out.push_str("  or by setting COMPITUM_LOCALES to point at one.\n");
         return out;
     }
-    out.push_str(&format!("\n  {:<10} {:<8} {}\n", "tag", "coverage", "language"));
+    out.push_str(&format!(
+        "\n  {:<10} {:<8} {}\n",
+        "tag", "coverage", "language"
+    ));
     for (tag, coverage, native_name) in available {
         let marker = if tag == active { "*" } else { " " };
         out.push_str(&format!(
@@ -465,7 +523,10 @@ pub fn render_locale_check(
         translator.text("cmd.locales.check")
     ));
     out.push_str(&heading(&translator.text("section.details")));
-    out.push_str(&field(&translator.text("field.coverage"), format!("{coverage}%")));
+    out.push_str(&field(
+        &translator.text("field.coverage"),
+        format!("{coverage}%"),
+    ));
     out.push_str(&field(&translator.text("field.missing"), missing.len()));
     out.push_str(&field("obsolete", obsolete.len()));
 
@@ -490,10 +551,10 @@ pub fn render_locale_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compitum_isa::{FeatureSet, IsaFeature};
     use compitum_pe::pe_fixture;
     use compitum_pe::pe_fixture::{machine, subsystem};
     use compitum_router::{decide, BackendSet, Request, Route};
-    use compitum_isa::{FeatureSet, IsaFeature};
 
     fn translator() -> Translator {
         Translator::english_only()
@@ -513,7 +574,9 @@ mod tests {
             "aarch64",
             4096,
             8,
-            FeatureSet::new().with(IsaFeature::Fp).with(IsaFeature::Asimd),
+            FeatureSet::new()
+                .with(IsaFeature::Fp)
+                .with(IsaFeature::Asimd),
         );
         decide(&Request::new(an_image(), host, BackendSet::all()))
     }
@@ -543,12 +606,8 @@ mod tests {
 
     #[test]
     fn host_output_lists_missing_watched_features() {
-        let host = HostProfile::synthetic(
-            "aarch64",
-            4096,
-            8,
-            FeatureSet::new().with(IsaFeature::Fp),
-        );
+        let host =
+            HostProfile::synthetic("aarch64", 4096, 8, FeatureSet::new().with(IsaFeature::Fp));
         let text = render_host(&host, &translator(), false);
         // The absence of SME is the single most decision-relevant fact about most ARM64
         // phones, so it must appear.
@@ -602,7 +661,10 @@ mod tests {
         let digest = compitum_digest::sha256(b"x");
         let text = render_inspect(&image, "x", Some(&digest), 1, &translator(), true, false);
         let value = compitum_json::parse(&text).unwrap();
-        assert_eq!(value["subject_sha256"].as_str(), Some(digest.to_hex().as_str()));
+        assert_eq!(
+            value["subject_sha256"].as_str(),
+            Some(digest.to_hex().as_str())
+        );
     }
 
     #[test]
@@ -611,7 +673,10 @@ mod tests {
         let text = render_plan(&plan, "app.exe", &translator(), false, false);
         assert!(text.contains("NATIVE"));
         assert!(text.contains("100%"));
-        assert!(text.contains("none"), "a native route must report no emulation");
+        assert!(
+            text.contains("none"),
+            "a native route must report no emulation"
+        );
         assert!(text.contains("app.exe"));
     }
 
@@ -631,7 +696,9 @@ mod tests {
             "aarch64",
             4096,
             8,
-            FeatureSet::new().with(IsaFeature::Fp).with(IsaFeature::Asimd),
+            FeatureSet::new()
+                .with(IsaFeature::Fp)
+                .with(IsaFeature::Asimd),
         );
         let requirements = vec![compitum_isa::Requirement::new(
             IsaFeature::Sme,
@@ -645,7 +712,10 @@ mod tests {
         assert_eq!(plan.route, Route::Refused);
         let text = render_plan(&plan, "x", &translator(), false, false);
         assert!(text.contains("REFUSED"));
-        assert!(text.contains("sme"), "the missing feature must be named:\n{text}");
+        assert!(
+            text.contains("sme"),
+            "the missing feature must be named:\n{text}"
+        );
     }
 
     #[test]
@@ -710,12 +780,22 @@ mod tests {
         let value = compitum_json::parse(&text).unwrap();
         assert_eq!(value["active"].as_str(), Some("en"));
         assert_eq!(value["count"].as_u64(), Some(1));
-        assert_eq!(value["locales"].as_array().unwrap()[0]["tag"].as_str(), Some("fa"));
+        assert_eq!(
+            value["locales"].as_array().unwrap()[0]["tag"].as_str(),
+            Some("fa")
+        );
     }
 
     #[test]
     fn locale_check_lists_gaps_and_says_when_complete() {
-        let text = render_locale_check("fa", 40, &["a.b".to_owned()], &["old.key".to_owned()], &translator(), false);
+        let text = render_locale_check(
+            "fa",
+            40,
+            &["a.b".to_owned()],
+            &["old.key".to_owned()],
+            &translator(),
+            false,
+        );
         assert!(text.contains("40%"));
         assert!(text.contains("a.b"));
         assert!(text.contains("old.key"));

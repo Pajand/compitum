@@ -187,8 +187,9 @@ impl ReasonCode {
             // un-runnable when no translator is installed, which `BackendAbsent` reports.
             // Classifying them as Blocked made every translatable image look like a
             // refusal -- the exact opposite of the truth, and a bug this test caught.
-            ReasonCode::ArchitectureRequiresTranslation
-            | ReasonCode::ArchitectureRequiresWow64 => Severity::Caution,
+            ReasonCode::ArchitectureRequiresTranslation | ReasonCode::ArchitectureRequiresWow64 => {
+                Severity::Caution
+            }
 
             // These genuinely prevent execution.
             ReasonCode::ArchitectureUnsupported
@@ -436,8 +437,7 @@ impl Reasons {
     /// Serializes the collection.
     #[must_use]
     pub fn to_json(&self) -> compitum_json::Value {
-        let items: Vec<compitum_json::Value> =
-            self.items.iter().map(Reason::to_json).collect();
+        let items: Vec<compitum_json::Value> = self.items.iter().map(Reason::to_json).collect();
         compitum_json::Value::from(items)
     }
 }
@@ -536,14 +536,10 @@ mod tests {
 
     #[test]
     fn severity_markers_are_distinct() {
-        let markers: Vec<char> = [
-            Severity::Supporting,
-            Severity::Caution,
-            Severity::Blocked,
-        ]
-        .iter()
-        .map(|s| s.marker())
-        .collect();
+        let markers: Vec<char> = [Severity::Supporting, Severity::Caution, Severity::Blocked]
+            .iter()
+            .map(|s| s.marker())
+            .collect();
         let unique: std::collections::BTreeSet<char> = markers.iter().copied().collect();
         assert_eq!(unique.len(), 3);
     }
@@ -572,10 +568,8 @@ mod tests {
 
     #[test]
     fn missing_features_reason_names_the_features() {
-        let reason = Reason::missing_features(
-            &[IsaFeature::Sme, IsaFeature::Sve2],
-            Confidence::HIGH,
-        );
+        let reason =
+            Reason::missing_features(&[IsaFeature::Sme, IsaFeature::Sve2], Confidence::HIGH);
         assert_eq!(reason.code, ReasonCode::IsaFeaturesMissing);
         assert_eq!(reason.severity, Severity::Blocked);
         let detail = reason.detail.unwrap();
@@ -587,8 +581,7 @@ mod tests {
 
     #[test]
     fn weak_confidence_is_rendered_not_hidden() {
-        let reason = Reason::new(ReasonCode::IsaEvidenceWeak)
-            .confidence(Confidence::MEDIUM);
+        let reason = Reason::new(ReasonCode::IsaEvidenceWeak).confidence(Confidence::MEDIUM);
         let text = reason.to_string();
         assert!(text.contains("60%"), "got: {text}");
     }
@@ -612,9 +605,7 @@ mod tests {
     fn weakest_confidence_is_the_floor() {
         let mut reasons = Reasons::new();
         reasons.push(Reason::new(ReasonCode::ArchitectureNative));
-        reasons.push(
-            Reason::new(ReasonCode::IsaEvidenceWeak).confidence(Confidence::MEDIUM),
-        );
+        reasons.push(Reason::new(ReasonCode::IsaEvidenceWeak).confidence(Confidence::MEDIUM));
         assert_eq!(reasons.weakest_confidence(), Confidence::MEDIUM);
         assert_eq!(Reasons::new().weakest_confidence(), Confidence::CERTAIN);
     }
@@ -622,7 +613,10 @@ mod tests {
     #[test]
     fn json_export_is_well_formed() {
         let mut reasons = Reasons::new();
-        reasons.push(Reason::with_detail(ReasonCode::ArchitectureHybrid, "ARM64EC"));
+        reasons.push(Reason::with_detail(
+            ReasonCode::ArchitectureHybrid,
+            "ARM64EC",
+        ));
         let json = reasons.to_json();
         let array = json.as_array().unwrap();
         assert_eq!(array.len(), 1);

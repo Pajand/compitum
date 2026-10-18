@@ -31,7 +31,7 @@ use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use compitum_json::{Value, parse};
+use compitum_json::{parse, Value};
 use compitum_router::Plan;
 
 use crate::record::{HostSnapshot, Outcome, Record, RECORD_SCHEMA_VERSION};
@@ -236,8 +236,8 @@ impl Ledger {
                 // Never downgrade evidence: a static analysis must not overwrite an
                 // observed execution, and an observed outcome must not be replaced by a
                 // prediction.
-                let keep_outcome = previous.provenance.weight_permille()
-                    > record.provenance.weight_permille();
+                let keep_outcome =
+                    previous.provenance.weight_permille() > record.provenance.weight_permille();
                 let merged = if keep_outcome {
                     Record {
                         outcome: previous.outcome,
@@ -277,10 +277,7 @@ impl Ledger {
     /// observations, without re-running anything.
     #[must_use]
     pub fn applicable_to(&self, host: &HostSnapshot) -> Vec<&Record> {
-        self.records
-            .iter()
-            .filter(|r| r.applies_to(host))
-            .collect()
+        self.records.iter().filter(|r| r.applies_to(host)).collect()
     }
 
     /// The best available answer for a subject on a host, if any.
@@ -539,7 +536,10 @@ fn load_lines(text: &str) -> (Vec<Record>, LoadStats) {
             stats.blank_lines += 1;
             continue;
         }
-        match parse(trimmed).ok().and_then(|value| Record::from_json(&value)) {
+        match parse(trimmed)
+            .ok()
+            .and_then(|value| Record::from_json(&value))
+        {
             Some(record) => {
                 records.push(record);
                 stats.records_loaded += 1;
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn a_new_ledger_is_created_and_empty() {
         let path = temp_ledger("new");
-        let ledger = Ledger::open(&path).unwrap();
+        let ledger = Ledger::open(path.clone()).unwrap();
         assert!(ledger.is_empty());
         assert!(ledger.was_created());
         assert_eq!(ledger.len(), 0);
@@ -627,23 +627,26 @@ mod tests {
     fn records_persist_across_reopen() {
         let path = temp_ledger("persist");
         {
-            let mut ledger = Ledger::open(&path).unwrap();
+            let mut ledger = Ledger::open(path.clone()).unwrap();
             let action = ledger.record(record_for("alpha", &host(&["fp"]))).unwrap();
             assert_eq!(action, RecordAction::Appended);
             assert_eq!(ledger.len(), 1);
         }
 
-        let reopened = Ledger::open(&path).unwrap();
+        let reopened = Ledger::open(path.clone()).unwrap();
         assert_eq!(reopened.len(), 1);
         assert!(reopened.stats().is_clean());
-        assert_eq!(reopened.records()[0].subject_label.as_deref(), Some("alpha.exe"));
+        assert_eq!(
+            reopened.records()[0].subject_label.as_deref(),
+            Some("alpha.exe")
+        );
         assert!(!reopened.was_created());
     }
 
     #[test]
     fn identical_observations_fold_into_one_line() {
         let path = temp_ledger("fold");
-        let mut ledger = Ledger::open(&path).unwrap();
+        let mut ledger = Ledger::open(path.clone()).unwrap();
         let host = host(&["fp"]);
 
         assert_eq!(
@@ -652,30 +655,43 @@ mod tests {
         );
         let action = ledger.record(record_for("same", &host)).unwrap();
         assert!(matches!(action, RecordAction::Updated { .. }));
-        assert_eq!(ledger.len(), 1, "the same subject and host must not duplicate");
+        assert_eq!(
+            ledger.len(),
+            1,
+            "the same subject and host must not duplicate"
+        );
 
         // And the file on disk must agree with memory.
-        let reopened = Ledger::open(&path).unwrap();
+        let reopened = Ledger::open(path.clone()).unwrap();
         assert_eq!(reopened.len(), 1);
     }
 
     #[test]
     fn different_host_classes_are_separate_records() {
         let path = temp_ledger("hosts");
-        let mut ledger = Ledger::open(&path).unwrap();
+        let mut ledger = Ledger::open(path.clone()).unwrap();
         ledger.record(record_for("multi", &host(&["fp"]))).unwrap();
-        ledger.record(record_for("multi", &host(&["fp", "sve2"]))).unwrap();
-        assert_eq!(ledger.len(), 2, "a different host is a different observation");
+        ledger
+            .record(record_for("multi", &host(&["fp", "sve2"])))
+            .unwrap();
+        assert_eq!(
+            ledger.len(),
+            2,
+            "a different host is a different observation"
+        );
     }
 
     #[test]
     fn a_static_analysis_never_overwrites_an_observed_execution() {
         let path = temp_ledger("evidence");
-        let mut ledger = Ledger::open(&path).unwrap();
+        let mut ledger = Ledger::open(path.clone()).unwrap();
         let host = host(&["fp"]);
 
-        let observed = record_for("evidence", &host)
-            .with_outcome(Outcome::Success, Provenance::ObservedExecution, Some("ran fine".into()));
+        let observed = record_for("evidence", &host).with_outcome(
+            Outcome::Success,
+            Provenance::ObservedExecution,
+            Some("ran fine".into()),
+        );
         ledger.record(observed).unwrap();
 
         // A later static analysis of the same file must not erase the measurement.
@@ -690,18 +706,24 @@ mod tests {
     #[test]
     fn a_stronger_observation_does_replace_a_weaker_one() {
         let path = temp_ledger("upgrade");
-        let mut ledger = Ledger::open(&path).unwrap();
+        let mut ledger = Ledger::open(path.clone()).unwrap();
         let host = host(&["fp"]);
 
         ledger.record(record_for("upgrade", &host)).unwrap();
         assert_eq!(ledger.records()[0].outcome, Outcome::Unknown);
 
-        let observed = record_for("upgrade", &host)
-            .with_outcome(Outcome::Failure, Provenance::ObservedExecution, None);
+        let observed = record_for("upgrade", &host).with_outcome(
+            Outcome::Failure,
+            Provenance::ObservedExecution,
+            None,
+        );
         ledger.record(observed).unwrap();
 
         assert_eq!(ledger.records()[0].outcome, Outcome::Failure);
-        assert_eq!(ledger.records()[0].provenance, Provenance::ObservedExecution);
+        assert_eq!(
+            ledger.records()[0].provenance,
+            Provenance::ObservedExecution
+        );
         assert_eq!(ledger.len(), 1);
     }
 
@@ -717,7 +739,7 @@ mod tests {
         )
         .unwrap();
 
-        let ledger = Ledger::open(&path).unwrap();
+        let ledger = Ledger::open(path.clone()).unwrap();
         // The two identical good lines fold is *not* applied on load; they are both read.
         assert_eq!(ledger.stats().records_loaded, 2);
         assert_eq!(ledger.stats().unreadable_lines, 2);
@@ -730,7 +752,7 @@ mod tests {
     fn comments_and_blank_lines_are_permitted() {
         let path = temp_ledger("comments");
         std::fs::write(&path, "# ledger header\n\n\n").unwrap();
-        let ledger = Ledger::open(&path).unwrap();
+        let ledger = Ledger::open(path.clone()).unwrap();
         assert!(ledger.is_empty());
         assert!(ledger.stats().is_clean());
         assert_eq!(ledger.stats().blank_lines, 3);
@@ -821,9 +843,9 @@ mod tests {
         ledger.record(record_for("s2", &h)).unwrap();
         let mut failure = record_for("s3", &h);
         failure.outcome = Outcome::Failure;
-        failure.route = "refused".to_owned();
+        failure.route = String::from("refused");
         failure.blocked = true;
-        failure.host_class = "different-class".to_owned();
+        failure.host_class = String::from("different-class");
         ledger.record(failure).unwrap();
 
         let routes = ledger.count_by_route();

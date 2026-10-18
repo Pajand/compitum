@@ -218,10 +218,7 @@ impl Object {
     /// Looks up a key.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     /// Returns `true` when the key is present.
@@ -496,7 +493,11 @@ pub struct ParseError {
 
 impl Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "JSON parse error at byte {}: {}", self.offset, self.message)
+        write!(
+            f,
+            "JSON parse error at byte {}: {}",
+            self.offset, self.message
+        )
     }
 }
 
@@ -685,10 +686,9 @@ impl<'a> Parser<'a> {
                         b't' => out.push('\t'),
                         b'u' => out.push(self.parse_unicode_escape()?),
                         other => {
-                            return Err(self.err(format!(
-                                "invalid escape sequence '\\{}'",
-                                other as char
-                            )))
+                            return Err(
+                                self.err(format!("invalid escape sequence '\\{}'", other as char))
+                            )
                         }
                     }
                 }
@@ -700,7 +700,10 @@ impl<'a> Parser<'a> {
                     let rest = &self.bytes[self.pos..];
                     let decoded = std::str::from_utf8(rest)
                         .map_err(|_| self.err("invalid UTF-8 in string"))?;
-                    let ch = decoded.chars().next().ok_or_else(|| self.err("empty string"))?;
+                    let ch = decoded
+                        .chars()
+                        .next()
+                        .ok_or_else(|| self.err("empty string"))?;
                     out.push(ch);
                     self.pos += ch.len_utf8();
                 }
@@ -731,7 +734,9 @@ impl<'a> Parser<'a> {
     fn parse_hex4(&mut self) -> Result<u32, ParseError> {
         let mut value = 0u32;
         for _ in 0..4 {
-            let byte = self.peek().ok_or_else(|| self.err("truncated \\u escape"))?;
+            let byte = self
+                .peek()
+                .ok_or_else(|| self.err("truncated \\u escape"))?;
             let digit = match byte {
                 b'0'..=b'9' => u32::from(byte - b'0'),
                 b'a'..=b'f' => u32::from(byte - b'a') + 10,

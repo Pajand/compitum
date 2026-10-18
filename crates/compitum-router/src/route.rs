@@ -223,7 +223,8 @@ pub enum Backend {
 
 impl Backend {
     /// Every backend COMPITUM knows about.
-    pub const ALL: &'static [Backend] = &[Backend::Wine, Backend::Fex, Backend::Box64, Backend::Box86];
+    pub const ALL: &'static [Backend] =
+        &[Backend::Wine, Backend::Fex, Backend::Box64, Backend::Box86];
 
     /// Stable identifier for JSON and Oracle records.
     #[must_use]
@@ -255,12 +256,8 @@ impl Backend {
                 "user-mode translation of x86 and x86-64 instructions to AArch64, with an \
                  ARM64EC-compatible mode that allows mixing with native code in one process"
             }
-            Backend::Box64 => {
-                "user-mode translation of x86-64 instructions to AArch64"
-            }
-            Backend::Box86 => {
-                "user-mode translation of 32-bit x86 instructions to AArch64"
-            }
+            Backend::Box64 => "user-mode translation of x86-64 instructions to AArch64",
+            Backend::Box86 => "user-mode translation of 32-bit x86 instructions to AArch64",
             Backend::Wine => {
                 "translation of Windows NT system calls to the host operating system; \
                  required for every Windows image, including natively-executing ones"
@@ -340,7 +337,10 @@ impl BackendSet {
 
     /// Iterates over the present backends in a stable order.
     pub fn iter(self) -> impl Iterator<Item = Backend> {
-        Backend::ALL.iter().copied().filter(move |b| self.contains(*b))
+        Backend::ALL
+            .iter()
+            .copied()
+            .filter(move |b| self.contains(*b))
     }
 
     /// The present backends as stable identifiers.
@@ -392,7 +392,10 @@ mod tests {
                 route.is_refusal(),
             ];
             let count = categories.iter().filter(|x| **x).count();
-            assert_eq!(count, 1, "{route} falls into {count} categories, expected exactly 1");
+            assert_eq!(
+                count, 1,
+                "{route} falls into {count} categories, expected exactly 1"
+            );
         }
     }
 
@@ -417,7 +420,12 @@ mod tests {
         assert_eq!(native.min_percent, 100);
         assert_eq!(native.max_percent, 100);
 
-        for slower in [Route::FexPartial, Route::FexFull, Route::Box64Full, Route::Wow64] {
+        for slower in [
+            Route::FexPartial,
+            Route::FexFull,
+            Route::Box64Full,
+            Route::Wow64,
+        ] {
             let expectation = slower.expected_throughput().unwrap();
             assert!(
                 expectation.max_percent < 100,
@@ -476,7 +484,10 @@ mod tests {
     fn expectations_carry_their_basis() {
         for route in [Route::FexPartial, Route::FexFull, Route::Box64Full] {
             let e = route.expected_throughput().unwrap();
-            assert!(!e.basis.is_empty(), "{route} gives no basis for its estimate");
+            assert!(
+                !e.basis.is_empty(),
+                "{route} gives no basis for its estimate"
+            );
         }
     }
 

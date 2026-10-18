@@ -194,11 +194,12 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             }
             other => {
                 if command.is_none() {
-                    command = Some(parse_command(other).ok_or_else(|| {
-                        ParseError::UnknownCommand {
-                            word: other.to_owned(),
-                        }
-                    })?);
+                    command =
+                        Some(
+                            parse_command(other).ok_or_else(|| ParseError::UnknownCommand {
+                                word: other.to_owned(),
+                            })?,
+                        );
                 } else {
                     operands.push(other.to_owned());
                 }
@@ -314,7 +315,10 @@ mod tests {
         assert_eq!(parse(&args(&["h"])).unwrap().command, Command::Host);
         assert_eq!(parse(&args(&["i", "x"])).unwrap().command, Command::Inspect);
         assert_eq!(parse(&args(&["v", "x"])).unwrap().command, Command::Verify);
-        assert_eq!(parse(&args(&["o", "stats"])).unwrap().command, Command::Oracle);
+        assert_eq!(
+            parse(&args(&["o", "stats"])).unwrap().command,
+            Command::Oracle
+        );
     }
 
     #[test]
@@ -347,9 +351,19 @@ mod tests {
 
     #[test]
     fn value_options_consume_the_next_argument() {
-        let invocation =
-            parse(&args(&["verify", "x", "--ledger", "/tmp/led.jsonl", "--lang", "fa"])).unwrap();
-        assert_eq!(invocation.options.ledger_path.as_deref(), Some("/tmp/led.jsonl"));
+        let invocation = parse(&args(&[
+            "verify",
+            "x",
+            "--ledger",
+            "/tmp/led.jsonl",
+            "--lang",
+            "fa",
+        ]))
+        .unwrap();
+        assert_eq!(
+            invocation.options.ledger_path.as_deref(),
+            Some("/tmp/led.jsonl")
+        );
         assert_eq!(invocation.options.lang.as_deref(), Some("fa"));
     }
 
@@ -357,7 +371,10 @@ mod tests {
     fn a_value_may_begin_with_a_dash() {
         // Paths and feature ids legitimately do, so the parser must not treat this as a flag.
         let invocation = parse(&args(&["verify", "x", "--ledger", "-weird-name"])).unwrap();
-        assert_eq!(invocation.options.ledger_path.as_deref(), Some("-weird-name"));
+        assert_eq!(
+            invocation.options.ledger_path.as_deref(),
+            Some("-weird-name")
+        );
     }
 
     #[test]
@@ -400,13 +417,23 @@ mod tests {
     #[test]
     fn no_arguments_requires_a_command() {
         assert_eq!(parse(&[]).unwrap_err(), ParseError::NoCommand);
-        assert_eq!(parse(&args(&["--json"])).unwrap_err(), ParseError::NoCommand);
+        assert_eq!(
+            parse(&args(&["--json"])).unwrap_err(),
+            ParseError::NoCommand
+        );
     }
 
     #[test]
     fn repeatable_options_accumulate() {
-        let invocation =
-            parse(&args(&["verify", "x", "--require", "sme", "--require", "sve2"])).unwrap();
+        let invocation = parse(&args(&[
+            "verify",
+            "x",
+            "--require",
+            "sme",
+            "--require",
+            "sve2",
+        ]))
+        .unwrap();
         assert_eq!(invocation.options.require_feature, vec!["sme", "sve2"]);
     }
 
@@ -424,7 +451,10 @@ mod tests {
         .unwrap();
         assert_eq!(invocation.command, Command::Oracle);
         assert_eq!(invocation.operands, vec!["record", "app.exe"]);
-        assert_eq!(invocation.options.record_outcome.as_deref(), Some("success"));
+        assert_eq!(
+            invocation.options.record_outcome.as_deref(),
+            Some("success")
+        );
         assert_eq!(invocation.options.note.as_deref(), Some("ran fine"));
     }
 
@@ -432,9 +462,21 @@ mod tests {
     fn usage_documents_every_command_and_option() {
         let text = usage();
         for word in [
-            "host", "inspect", "verify", "oracle", "locales", "--json", "--verbose",
-            "--headless", "--require", "--backends", "--ledger", "--no-record", "--lang",
-            "--help", "--version",
+            "host",
+            "inspect",
+            "verify",
+            "oracle",
+            "locales",
+            "--json",
+            "--verbose",
+            "--headless",
+            "--require",
+            "--backends",
+            "--ledger",
+            "--no-record",
+            "--lang",
+            "--help",
+            "--version",
         ] {
             assert!(text.contains(word), "usage does not mention `{word}`");
         }
@@ -443,10 +485,16 @@ mod tests {
     #[test]
     fn every_parse_error_has_a_message_key() {
         for error in [
-            ParseError::UnknownOption { option: "-x".to_owned() },
-            ParseError::MissingValue { option: "--x".to_owned() },
+            ParseError::UnknownOption {
+                option: "-x".to_owned(),
+            },
+            ParseError::MissingValue {
+                option: "--x".to_owned(),
+            },
             ParseError::NoCommand,
-            ParseError::UnknownCommand { word: "x".to_owned() },
+            ParseError::UnknownCommand {
+                word: "x".to_owned(),
+            },
         ] {
             assert!(!error.message_key().is_empty());
             assert!(!error.to_string().is_empty());

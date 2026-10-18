@@ -39,9 +39,9 @@ impl Digest {
     ///
     /// Published in FIPS 180-4 and asserted in the tests below.
     pub const EMPTY: Digest = Digest([
-        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
-        0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
-        0x78, 0x52, 0xb8, 0x55,
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9,
+        0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52,
+        0xb8, 0x55,
     ]);
 
     /// Wraps raw digest bytes.
@@ -396,10 +396,22 @@ mod tests {
         // length 63, which is precisely the failure mode this comment exists to prevent:
         // a test that asserts a made-up value passes until the day it matters.
         let cases: [(usize, &str); 4] = [
-            (55, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
-            (56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"),
-            (63, "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34"),
-            (64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
+            (
+                55,
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                56,
+                "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            ),
+            (
+                63,
+                "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34",
+            ),
+            (
+                64,
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
         ];
         for (len, want) in cases {
             let data = vec![b'a'; len];
@@ -411,8 +423,8 @@ mod tests {
     fn length_55_and_56_differ_and_both_hash() {
         // A weaker but version-independent property: the two must not collide, and both
         // must produce a full-length digest.
-        let a = hex_of(&vec![b'a'; 55]);
-        let b = hex_of(&vec![b'a'; 56]);
+        let a = hex_of(&[b'a'; 55]);
+        let b = hex_of(&[b'a'; 56]);
         assert_ne!(a, b);
         assert_eq!(a.len(), 64);
         assert_eq!(b.len(), 64);

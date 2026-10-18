@@ -137,7 +137,6 @@ pub fn decoded_bit_assignments() -> Vec<(&'static str, u32, IsaFeature)> {
     out
 }
 
-
 /// AT_* entry types from `<elf.h>` that COMPITUM consumes.
 const AT_HWCAP: u64 = 16;
 /// `AT_HWCAP2`, the second capability bitmap.
@@ -551,8 +550,14 @@ mod tests {
         assert!(!set.contains(IsaFeature::Sve));
         // Guards the exact confusion this test previously contained: bit 2 is EVTSTRM
         // (unmapped) and bit 9 is f16, so neither may be reported as AES or CPUID.
-        assert!(!set.contains(IsaFeature::Fp16), "bit 9 is f16, which is clear here");
-        assert!(!set.contains(IsaFeature::Fcma), "bit 14 is fcma, which is clear here");
+        assert!(
+            !set.contains(IsaFeature::Fp16),
+            "bit 9 is f16, which is clear here"
+        );
+        assert!(
+            !set.contains(IsaFeature::Fcma),
+            "bit 14 is fcma, which is clear here"
+        );
     }
 
     #[test]
@@ -588,7 +593,10 @@ mod tests {
         assert!(set.contains(IsaFeature::Frint), "HWCAP2 bit 8 is FRINT");
         // HWCAP2 bit 16 is RNG; this device does not implement it. Asserting its
         // absence is what proves the table is not simply setting every bit it knows.
-        assert!(!set.contains(IsaFeature::Rng), "HWCAP2 bit 16 (RNG) is clear here");
+        assert!(
+            !set.contains(IsaFeature::Rng),
+            "HWCAP2 bit 16 (RNG) is clear here"
+        );
         assert!(set.contains(IsaFeature::DcPopDp), "HWCAP2 bit 0 is DCPODP");
         assert!(set.contains(IsaFeature::DcPop), "HWCAP bit 16 is DCPOP");
         assert!(set.contains(IsaFeature::DotProd), "HWCAP bit 20 is DOTPROD");
@@ -645,7 +653,10 @@ Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpui
     fn token_mapping_is_total_for_documented_names() {
         assert_eq!(feature_from_cpuinfo_token("atomics"), Some(IsaFeature::Lse));
         assert_eq!(feature_from_cpuinfo_token("lse"), Some(IsaFeature::Lse));
-        assert_eq!(feature_from_cpuinfo_token("asimddp"), Some(IsaFeature::DotProd));
+        assert_eq!(
+            feature_from_cpuinfo_token("asimddp"),
+            Some(IsaFeature::DotProd)
+        );
         assert_eq!(feature_from_cpuinfo_token("sme"), Some(IsaFeature::Sme));
         assert_eq!(feature_from_cpuinfo_token("nope"), None);
     }
@@ -684,18 +695,27 @@ Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpui
 
     #[test]
     fn guaranteed_features_falls_back_when_no_cpuinfo() {
-        let host = HostProfile::synthetic("aarch64", 4096, 8, FeatureSet::new().with(IsaFeature::Sve2));
+        let host =
+            HostProfile::synthetic("aarch64", 4096, 8, FeatureSet::new().with(IsaFeature::Sve2));
         assert!(host.guaranteed_features().contains(IsaFeature::Sve2));
     }
 
     #[test]
     fn json_export_has_required_keys() {
-        let host = HostProfile::synthetic("aarch64", 16384, 8, FeatureSet::new().with(IsaFeature::Sve2));
+        let host = HostProfile::synthetic(
+            "aarch64",
+            16384,
+            8,
+            FeatureSet::new().with(IsaFeature::Sve2),
+        );
         let json = host.to_json();
         assert_eq!(json["arch"].as_str(), Some("aarch64"));
         assert_eq!(json["page_size"].as_u64(), Some(16384));
         assert_eq!(json["cpu_count"].as_u64(), Some(8));
-        assert!(json["features"].as_array().unwrap().contains(&compitum_json::Value::from("sve2")));
+        assert!(json["features"]
+            .as_array()
+            .unwrap()
+            .contains(&compitum_json::Value::from("sve2")));
     }
 
     #[test]

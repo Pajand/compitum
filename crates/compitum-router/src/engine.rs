@@ -179,7 +179,14 @@ pub fn decide(request: &Request) -> Plan {
     }
 
     let family = image.family();
-    let route = select_route(family, image, host, &request.requirements, request, &mut reasons);
+    let route = select_route(
+        family,
+        image,
+        host,
+        &request.requirements,
+        request,
+        &mut reasons,
+    );
 
     // ---- Rule 6: cautions --------------------------------------------------
     annotate_cautions(image, host, request, &mut reasons);
@@ -435,7 +442,10 @@ fn annotate_cautions(
             );
         }
     } else {
-        reasons.add_detail(ReasonCode::SubsystemHeadlessCapable, subsystem.description());
+        reasons.add_detail(
+            ReasonCode::SubsystemHeadlessCapable,
+            subsystem.description(),
+        );
     }
 
     // ---- Graphics ----------------------------------------------------------
@@ -510,11 +520,7 @@ mod tests {
 
     #[test]
     fn pure_arm64_routes_native() {
-        let request = Request::new(
-            image(0xAA64),
-            reference_host(),
-            full_backends(),
-        );
+        let request = Request::new(image(0xAA64), reference_host(), full_backends());
         let plan = decide(&request);
         assert_eq!(plan.route, Route::Native);
         assert!(plan.is_fully_native());
@@ -526,7 +532,10 @@ mod tests {
         let request = Request::new(image(0xA64E), reference_host(), full_backends());
         let plan = decide(&request);
         assert_eq!(plan.route, Route::PickNativeSlice);
-        assert!(plan.is_fully_native(), "slice selection must avoid translation");
+        assert!(
+            plan.is_fully_native(),
+            "slice selection must avoid translation"
+        );
         assert_eq!(plan.required_backend(), None);
     }
 
@@ -590,7 +599,10 @@ mod tests {
         assert_eq!(plan.route, Route::Refused);
         assert!(plan.reasons.contains(ReasonCode::IsaFeaturesMissing));
         let headline = plan.headline();
-        assert!(headline.contains("sme"), "headline must name the missing feature: {headline}");
+        assert!(
+            headline.contains("sme"),
+            "headline must name the missing feature: {headline}"
+        );
     }
 
     #[test]
@@ -644,12 +656,7 @@ mod tests {
 
     #[test]
     fn page_size_mismatch_is_recorded() {
-        let host = HostProfile::synthetic(
-            "aarch64",
-            16384,
-            8,
-            FeatureSet::all(),
-        );
+        let host = HostProfile::synthetic("aarch64", 16384, 8, FeatureSet::all());
         let request = Request::new(image(0xAA64), host, full_backends());
         let plan = decide(&request);
         assert!(plan.reasons.contains(ReasonCode::PageSizeMismatch));

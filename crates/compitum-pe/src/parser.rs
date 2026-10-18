@@ -44,6 +44,18 @@ pub const MAGIC_PE32_PLUS: u16 = 0x020B;
 const COFF_HEADER_SIZE: usize = 20;
 /// Size of the section table entry.
 const SECTION_HEADER_SIZE: usize = 40;
+/// Size of one data-directory entry: a relative virtual address followed by a size.
+const DATA_DIRECTORY_ENTRY_SIZE: usize = 8;
+/// Number of data directories a well-formed optional header declares.
+const DATA_DIRECTORY_COUNT: usize = 16;
+/// `IMAGE_DIRECTORY_ENTRY_IMPORT`.
+const DIR_IMPORT: usize = 1;
+/// `IMAGE_DIRECTORY_ENTRY_RESOURCE`.
+const DIR_RESOURCE: usize = 2;
+/// `IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG`.
+const DIR_LOAD_CONFIG: usize = 10;
+/// `IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR` — the CLR runtime header.
+const DIR_CLR: usize = 14;
 
 /// `IMAGE_SUBSYSTEM_*` values COMPITUM distinguishes.
 ///
@@ -390,7 +402,9 @@ impl PeImage {
     /// The subsystem, defaulting to unknown when there is no optional header.
     #[must_use]
     pub fn subsystem(&self) -> Subsystem {
-        self.optional.as_ref().map_or(Subsystem::UNKNOWN, |o| o.subsystem)
+        self.optional
+            .as_ref()
+            .map_or(Subsystem::UNKNOWN, |o| o.subsystem)
     }
 
     /// Returns `true` when the image can plausibly run without a display.
@@ -412,7 +426,9 @@ impl PeImage {
     /// Returns `true` when the image is managed code.
     #[must_use]
     pub fn is_managed(&self) -> bool {
-        self.optional.as_ref().is_some_and(OptionalHeader::is_managed)
+        self.optional
+            .as_ref()
+            .is_some_and(OptionalHeader::is_managed)
     }
 
     /// Total bytes of executable code across all executable sections.
@@ -428,7 +444,9 @@ impl PeImage {
     /// The page size implied by the section alignment, when declared.
     #[must_use]
     pub fn implied_page_size(&self) -> Option<u32> {
-        self.optional.as_ref().map(OptionalHeader::implied_page_size)
+        self.optional
+            .as_ref()
+            .map(OptionalHeader::implied_page_size)
     }
 
     /// Returns the section containing `rva`, when any.
@@ -602,11 +620,7 @@ fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeade
     let (image_base, section_alignment_offset, shift) = if is_plus {
         (u64_at(data, offset + 24)?, offset + 32, 0usize)
     } else {
-        (
-            u64::from(u32_at(data, offset + 28)?),
-            offset + 32,
-            0usize,
-        )
+        (u64::from(u32_at(data, offset + 28)?), offset + 32, 0usize)
     };
 
     let section_alignment = u32_at(data, section_alignment_offset)?;
@@ -634,14 +648,8 @@ fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeade
         });
     }
 
-    // Directory indices, per the PE specification.
-    const DIR_IMPORT: usize = 1;
-    const DIR_RESOURCE: usize = 2;
-    const DIR_LOAD_CONFIG: usize = 10;
-    const DIR_CLR: usize = 14;
-
     let directory = |index: usize| -> Result<(u32, u32)> {
-        let base = data_directory_offset + index * 8;
+        let base = data_directory_offset + index * DATA_DIRECTORY_ENTRY_SIZE;
         Ok((u32_at(data, base)?, u32_at(data, base + 4)?))
     };
 
@@ -653,7 +661,7 @@ fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeade
     // Guard against a header that claims to be larger than the space actually reserved
     // for it. This is the check that stops a crafted `SizeOfOptionalHeader` from making
     // a later read walk into the section table.
-    let needed = data_directory_offset + 16 * 8;
+    let needed = data_directory_offset + DATA_DIRECTORY_COUNT * DATA_DIRECTORY_ENTRY_SIZE;
     let available = offset + usize::from(size);
     if needed > available {
         return Err(PeError::Truncated {
@@ -718,9 +726,9 @@ fn parse_imports(data: &[u8], image: &PeImage) -> Vec<ImportedModule> {
     // Name, FirstThunk. The table is terminated by an all-zero descriptor.
     let mut index = 0usize;
     while index < 4096 {
-        let Some(descriptor_offset) = image.rva_to_offset(
-            optional.import_directory_rva + (index as u32) * 20,
-        ) else {
+        let Some(descriptor_offset) =
+            image.rva_to_offset(optional.import_directory_rva + (index as u32) * 20)
+        else {
             break;
         };
         let Ok(name_rva) = u32_at(data, descriptor_offset + 12) else {
@@ -799,6 +807,13 @@ fn count_thunks(data: &[u8], image: &PeImage, descriptor_offset: usize) -> usize
 mod tests {
     use super::*;
 
+    /// Offset of the data-directory array within a PE32+ optional header.
+    ///
+    /// Only the fixture builder below needs this: the production parser derives the same
+    /// position by arithmetic from the layout anchor, which is what keeps it correct for
+    /// both PE32 and PE32+ without a second magic number.
+    const DATA_DIRECTORY_OFFSET_PE32PLUS: usize = 88;
+
     /// Builds a syntactically valid PE image with the given machine type and subsystem.
     ///
     /// The layout follows the specification exactly so the parser is exercised against
@@ -818,7 +833,8 @@ mod tests {
         let pe_offset = 0x80usize;
         let optional_size = 0xF0usize;
         let section_count = 1usize;
-        let total = pe_offset + 4 + 20 + optional_size + section_count * SECTION_HEADER_SIZE + 0x400;
+        let total =
+            pe_offset + 4 + 20 + optional_size + section_count * SECTION_HEADER_SIZE + 0x400;
 
         let mut data = vec![0u8; total];
         // DOS header.
@@ -846,7 +862,7 @@ mod tests {
         data[opt + 24..opt + 32].copy_from_slice(&(0x1_4000_0000u64).to_le_bytes()); // ImageBase
         data[opt + 32..opt + 36].copy_from_slice(&section_alignment.to_le_bytes());
         data[opt + 36..opt + 40].copy_from_slice(&512u32.to_le_bytes()); // FileAlignment
-        // SizeOfImage at +32+24 = +56; SizeOfHeaders at +60.
+                                                                         // SizeOfImage at +32+24 = +56; SizeOfHeaders at +60.
         data[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes());
         data[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes());
         // Subsystem at +32+24+24 = +80; DllCharacteristics at +82.
@@ -868,7 +884,8 @@ mod tests {
         if !extra_import.is_empty() {
             // Place an import directory inside the first section, at RVA 0x1000 + 0x100.
             let import_rva = section_alignment + 0x100;
-            let dir_base = opt + 88 + 1 * 8; // DIR_IMPORT
+            let dir_base =
+                opt + DATA_DIRECTORY_OFFSET_PE32PLUS + DIR_IMPORT * DATA_DIRECTORY_ENTRY_SIZE;
             data[dir_base..dir_base + 4].copy_from_slice(&import_rva.to_le_bytes());
             data[dir_base + 4..dir_base + 8]
                 .copy_from_slice(&((extra_import.len() as u32 + 1) * 20).to_le_bytes());
@@ -886,8 +903,7 @@ mod tests {
                 let thunk_file = name_cursor + module.len() + 4;
                 data[thunk_file..thunk_file + 8].copy_from_slice(&0x1234u64.to_le_bytes());
                 data[thunk_file + 8..thunk_file + 16].copy_from_slice(&0u64.to_le_bytes());
-                data[name_cursor..name_cursor + module.len()]
-                    .copy_from_slice(module.as_bytes());
+                data[name_cursor..name_cursor + module.len()].copy_from_slice(module.as_bytes());
                 name_cursor += module.len() + 1;
             }
         }

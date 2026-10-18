@@ -163,7 +163,12 @@ mod tests {
         let data = [0u8; 8];
         // Every one of these would wrap in an unchecked implementation: the add would
         // panic in debug and silently read the wrong location in release.
-        for offset in [usize::MAX, usize::MAX - 1, usize::MAX - 3, usize::MAX / 2 + 1] {
+        for offset in [
+            usize::MAX,
+            usize::MAX - 1,
+            usize::MAX - 3,
+            usize::MAX / 2 + 1,
+        ] {
             assert!(u8_at(&data, offset).is_err(), "u8 at {offset}");
             assert!(u16_at(&data, offset).is_err(), "u16 at {offset}");
             assert!(u32_at(&data, offset).is_err(), "u32 at {offset}");

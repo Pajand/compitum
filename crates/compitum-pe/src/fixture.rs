@@ -97,7 +97,11 @@ pub fn synthetic_advanced(
 ) -> Vec<u8> {
     let optional_size = OPTIONAL_SIZE;
     let section_count = 1usize;
-    let total = PE_OFFSET + 4 + 20 + optional_size + section_count * SECTION_HEADER_SIZE
+    let total = PE_OFFSET
+        + 4
+        + 20
+        + optional_size
+        + section_count * SECTION_HEADER_SIZE
         + TEXT_RAW_SIZE
         + 0x800;
 
@@ -128,16 +132,16 @@ pub fn synthetic_advanced(
     data[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes()); // PE32+ magic
     data[opt + 2] = 14; // linker major
     data[opt + 3] = 0; // linker minor
-    // SizeOfCode at +4, SizeOfInitializedData at +8: left zero, not load-bearing here.
-    // AddressOfEntryPoint at +16: zero, which is valid for a DLL.
-    // BaseOfCode at +20: zero.
+                       // SizeOfCode at +4, SizeOfInitializedData at +8: left zero, not load-bearing here.
+                       // AddressOfEntryPoint at +16: zero, which is valid for a DLL.
+                       // BaseOfCode at +20: zero.
     data[opt + 24..opt + 32].copy_from_slice(&0x0000_0001_4000_0000u64.to_le_bytes()); // ImageBase
     data[opt + 32..opt + 36].copy_from_slice(&section_alignment.to_le_bytes());
     data[opt + 36..opt + 40].copy_from_slice(&512u32.to_le_bytes()); // FileAlignment
     data[opt + 40..opt + 42].copy_from_slice(&10u16.to_le_bytes()); // MajorOperatingSystemVersion
     data[opt + 42..opt + 44].copy_from_slice(&0u16.to_le_bytes()); // MinorOperatingSystemVersion
     data[opt + 48..opt + 50].copy_from_slice(&10u16.to_le_bytes()); // MajorSubsystemVersion
-    // Win32VersionValue at +52: zero.
+                                                                    // Win32VersionValue at +52: zero.
     data[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes()); // SizeOfImage
     data[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfHeaders
     data[opt + 68..opt + 70].copy_from_slice(&3u16.to_le_bytes()); // MajorSubsystemVersion
@@ -271,10 +275,12 @@ mod tests {
             .unwrap()
             .coff
             .is_dll());
-        assert!(!parse(&synthetic(machine::ARM64, subsystem::CONSOLE, false))
-            .unwrap()
-            .coff
-            .is_dll());
+        assert!(
+            !parse(&synthetic(machine::ARM64, subsystem::CONSOLE, false))
+                .unwrap()
+                .coff
+                .is_dll()
+        );
     }
 
     #[test]
@@ -325,7 +331,15 @@ mod tests {
 
     #[test]
     fn timestamp_is_recorded_verbatim() {
-        let bytes = synthetic_advanced(0xAA64, subsystem::CONSOLE, false, &[], 0x1000, false, 1_700_000_000);
+        let bytes = synthetic_advanced(
+            0xAA64,
+            subsystem::CONSOLE,
+            false,
+            &[],
+            0x1000,
+            false,
+            1_700_000_000,
+        );
         assert_eq!(parse(&bytes).unwrap().coff.timestamp, 1_700_000_000);
     }
 

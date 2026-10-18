@@ -16,7 +16,9 @@
 
 use std::path::PathBuf;
 
-use compitum_pe::fixture::{machine, subsystem, synthetic, synthetic_advanced, synthetic_with_code};
+use compitum_pe::fixture::{
+    machine, subsystem, synthetic, synthetic_advanced, synthetic_with_code,
+};
 
 fn main() {
     let dir = std::env::args()
@@ -116,9 +118,15 @@ fn main() {
         code
     };
     let path = dir.join("needs-sve-sme.exe");
-    match std::fs::write(&path, synthetic_with_code(machine::ARM64, &sve_code, 0x1000)) {
+    match std::fs::write(
+        &path,
+        synthetic_with_code(machine::ARM64, &sve_code, 0x1000),
+    ) {
         Ok(()) => {
-            println!("{} (with scalable-vector and matrix opcodes)", path.display());
+            println!(
+                "{} (with scalable-vector and matrix opcodes)",
+                path.display()
+            );
             written += 1;
         }
         Err(error) => eprintln!("cannot write {}: {error}", path.display()),

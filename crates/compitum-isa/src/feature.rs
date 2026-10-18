@@ -170,24 +170,69 @@ pub enum IsaFeature {
 impl IsaFeature {
     /// Every feature COMPITUM knows about, in canonical order.
     pub const ALL: &'static [IsaFeature] = &[
-        IsaFeature::Fp, IsaFeature::Asimd,
-        IsaFeature::Aes, IsaFeature::Pmull, IsaFeature::Sha1, IsaFeature::Sha2,
-        IsaFeature::Crc32, IsaFeature::Lse, IsaFeature::Fp16, IsaFeature::Cpuid,
-        IsaFeature::AsimdRdm, IsaFeature::Jscvt, IsaFeature::Fcma, IsaFeature::Lrcpc,
-        IsaFeature::DotProd, IsaFeature::Sha3, IsaFeature::Sm3, IsaFeature::Sm4,
-        IsaFeature::Sha512, IsaFeature::F16MulAdd, IsaFeature::Dit, IsaFeature::Uscat,
-        IsaFeature::Ilrcpc, IsaFeature::FlagM, IsaFeature::Ssbs, IsaFeature::Sb,
-        IsaFeature::PaAuth, IsaFeature::PaAuthGen, IsaFeature::FlagM2, IsaFeature::Frint,
-        IsaFeature::Rng, IsaFeature::Bti, IsaFeature::Ecv, IsaFeature::Afp, IsaFeature::Rpres,
-        IsaFeature::Sve, IsaFeature::Sve2, IsaFeature::SveAes, IsaFeature::SvePmull,
-        IsaFeature::SveBitPerm, IsaFeature::SveSha3, IsaFeature::SveSm4, IsaFeature::SveI8mm,
-        IsaFeature::SveF32mm, IsaFeature::SveF64mm, IsaFeature::SveBf16,
-        IsaFeature::Sme, IsaFeature::SmeI16i64, IsaFeature::SmeF64f64, IsaFeature::SmeI8i32,
-        IsaFeature::SmeF16f32, IsaFeature::SmeB16f32, IsaFeature::SmeF32f32, IsaFeature::SmeFa64,
-        IsaFeature::Mte, IsaFeature::Mte3,
-        IsaFeature::I8mm, IsaFeature::Bf16, IsaFeature::Dgh,
-        IsaFeature::DcPop, IsaFeature::DcPopDp,
-        IsaFeature::Wfxt, IsaFeature::Virt,
+        IsaFeature::Fp,
+        IsaFeature::Asimd,
+        IsaFeature::Aes,
+        IsaFeature::Pmull,
+        IsaFeature::Sha1,
+        IsaFeature::Sha2,
+        IsaFeature::Crc32,
+        IsaFeature::Lse,
+        IsaFeature::Fp16,
+        IsaFeature::Cpuid,
+        IsaFeature::AsimdRdm,
+        IsaFeature::Jscvt,
+        IsaFeature::Fcma,
+        IsaFeature::Lrcpc,
+        IsaFeature::DotProd,
+        IsaFeature::Sha3,
+        IsaFeature::Sm3,
+        IsaFeature::Sm4,
+        IsaFeature::Sha512,
+        IsaFeature::F16MulAdd,
+        IsaFeature::Dit,
+        IsaFeature::Uscat,
+        IsaFeature::Ilrcpc,
+        IsaFeature::FlagM,
+        IsaFeature::Ssbs,
+        IsaFeature::Sb,
+        IsaFeature::PaAuth,
+        IsaFeature::PaAuthGen,
+        IsaFeature::FlagM2,
+        IsaFeature::Frint,
+        IsaFeature::Rng,
+        IsaFeature::Bti,
+        IsaFeature::Ecv,
+        IsaFeature::Afp,
+        IsaFeature::Rpres,
+        IsaFeature::Sve,
+        IsaFeature::Sve2,
+        IsaFeature::SveAes,
+        IsaFeature::SvePmull,
+        IsaFeature::SveBitPerm,
+        IsaFeature::SveSha3,
+        IsaFeature::SveSm4,
+        IsaFeature::SveI8mm,
+        IsaFeature::SveF32mm,
+        IsaFeature::SveF64mm,
+        IsaFeature::SveBf16,
+        IsaFeature::Sme,
+        IsaFeature::SmeI16i64,
+        IsaFeature::SmeF64f64,
+        IsaFeature::SmeI8i32,
+        IsaFeature::SmeF16f32,
+        IsaFeature::SmeB16f32,
+        IsaFeature::SmeF32f32,
+        IsaFeature::SmeFa64,
+        IsaFeature::Mte,
+        IsaFeature::Mte3,
+        IsaFeature::I8mm,
+        IsaFeature::Bf16,
+        IsaFeature::Dgh,
+        IsaFeature::DcPop,
+        IsaFeature::DcPopDp,
+        IsaFeature::Wfxt,
+        IsaFeature::Virt,
     ];
 
     /// The stable machine identifier, used in JSON and Oracle records.
@@ -482,7 +527,10 @@ impl FeatureSet {
 
     /// Iterates over the contained features in canonical order.
     pub fn iter(self) -> impl Iterator<Item = IsaFeature> {
-        IsaFeature::ALL.iter().copied().filter(move |f| self.contains(*f))
+        IsaFeature::ALL
+            .iter()
+            .copied()
+            .filter(move |f| self.contains(*f))
     }
 
     /// Returns the contained features as stable ids, in canonical order.
@@ -542,7 +590,9 @@ mod tests {
 
     #[test]
     fn insert_and_contains() {
-        let set = FeatureSet::new().with(IsaFeature::Sve2).with(IsaFeature::Sme);
+        let set = FeatureSet::new()
+            .with(IsaFeature::Sve2)
+            .with(IsaFeature::Sme);
         assert!(set.contains(IsaFeature::Sve2));
         assert!(set.contains(IsaFeature::Sme));
         assert!(!set.contains(IsaFeature::Mte));
@@ -586,14 +636,20 @@ mod tests {
 
     #[test]
     fn intersection_works() {
-        let a = FeatureSet::new().with(IsaFeature::Sve2).with(IsaFeature::Sme);
-        let b = FeatureSet::new().with(IsaFeature::Sve2).with(IsaFeature::Mte);
+        let a = FeatureSet::new()
+            .with(IsaFeature::Sve2)
+            .with(IsaFeature::Sme);
+        let b = FeatureSet::new()
+            .with(IsaFeature::Sve2)
+            .with(IsaFeature::Mte);
         assert_eq!(a.intersection(b).ids(), vec!["sve2"]);
     }
 
     #[test]
     fn remove_works() {
-        let mut set = FeatureSet::new().with(IsaFeature::Sve2).with(IsaFeature::Sme);
+        let mut set = FeatureSet::new()
+            .with(IsaFeature::Sve2)
+            .with(IsaFeature::Sme);
         set.remove(IsaFeature::Sve2);
         assert_eq!(set.ids(), vec!["sme"]);
     }
@@ -613,7 +669,9 @@ mod tests {
 
     #[test]
     fn display_lists_ids_in_canonical_order() {
-        let set = FeatureSet::new().with(IsaFeature::Mte).with(IsaFeature::Sve);
+        let set = FeatureSet::new()
+            .with(IsaFeature::Mte)
+            .with(IsaFeature::Sve);
         assert_eq!(set.to_string(), "sve, mte");
     }
 

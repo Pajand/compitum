@@ -397,9 +397,18 @@ mod tests {
 
     #[test]
     fn canonical_names_are_accurate() {
-        assert_eq!(Machine::ARM64.canonical_name(), Some("IMAGE_FILE_MACHINE_ARM64"));
-        assert_eq!(Machine::ARM64EC.canonical_name(), Some("IMAGE_FILE_MACHINE_ARM64EC"));
-        assert_eq!(Machine::ARM64X.canonical_name(), Some("IMAGE_FILE_MACHINE_ARM64X"));
+        assert_eq!(
+            Machine::ARM64.canonical_name(),
+            Some("IMAGE_FILE_MACHINE_ARM64")
+        );
+        assert_eq!(
+            Machine::ARM64EC.canonical_name(),
+            Some("IMAGE_FILE_MACHINE_ARM64EC")
+        );
+        assert_eq!(
+            Machine::ARM64X.canonical_name(),
+            Some("IMAGE_FILE_MACHINE_ARM64X")
+        );
         assert_eq!(Machine(0x1234).canonical_name(), None);
     }
 

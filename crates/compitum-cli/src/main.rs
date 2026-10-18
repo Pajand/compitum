@@ -48,11 +48,9 @@ use compitum_digest::Digest;
 use compitum_i18n::{Catalog, LocaleStore, Translator};
 use compitum_isa::{HostProfile, IsaFeature, Requirement, RequirementSource};
 use compitum_json::{to_pretty, Value};
-use compitum_oracle::{
-    default_path, HostSnapshot, Ledger, Outcome, Provenance, Record,
-};
+use compitum_oracle::{default_path, HostSnapshot, Ledger, Outcome, Provenance, Record};
 use compitum_pe::PeImage;
-use compitum_router::{decide, BackendSet, Backend, Request};
+use compitum_router::{decide, Backend, BackendSet, Request};
 
 /// Exit code for a completed run with a favourable or unneeded verdict.
 const EXIT_OK: u8 = 0;
@@ -193,8 +191,7 @@ fn command_verify(invocation: &Invocation, translator: &Translator) -> CliResult
 
     // Instruction-level analysis is what turns "declared architecture" into "actually
     // requires SME", so it runs on every verify.
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let scan = compitum_pe::scan_image(&bytes, &image);
 
     let mut requirements = scan.requirements.clone();
@@ -262,8 +259,7 @@ fn command_oracle(invocation: &Invocation, translator: &Translator) -> CliResult
         .ledger_path
         .clone()
         .unwrap_or_else(|| default_path().display().to_string());
-    let mut ledger =
-        Ledger::open(&ledger_path).map_err(|error| error.to_string())?;
+    let mut ledger = Ledger::open(ledger_path.clone()).map_err(|error| error.to_string())?;
 
     match subcommand {
         "stats" | "summary" => {
@@ -284,8 +280,7 @@ fn command_oracle(invocation: &Invocation, translator: &Translator) -> CliResult
                     None => true,
                 })
                 .collect();
-            let text =
-                render::render_records(&filtered, translator, invocation.options.json);
+            let text = render::render_records(&filtered, translator, invocation.options.json);
             print!("{text}");
             Ok(EXIT_OK)
         }
@@ -303,10 +298,7 @@ fn command_oracle(invocation: &Invocation, translator: &Translator) -> CliResult
             if found.is_empty() {
                 // Not an error: nobody has looked at this binary yet, which is a legitimate
                 // and common answer.
-                println!(
-                    "no observations recorded for {}",
-                    digest.to_hex()
-                );
+                println!("no observations recorded for {}", digest.to_hex());
                 return Ok(EXIT_OK);
             }
             let text = render::render_records(&found, translator, invocation.options.json);
@@ -314,9 +306,11 @@ fn command_oracle(invocation: &Invocation, translator: &Translator) -> CliResult
             Ok(EXIT_OK)
         }
         "record" => {
-            let path = invocation.operands.get(1).cloned().ok_or_else(|| {
-                "oracle record needs a binary path".to_owned()
-            })?;
+            let path = invocation
+                .operands
+                .get(1)
+                .cloned()
+                .ok_or_else(|| "oracle record needs a binary path".to_owned())?;
             let (image, digest, size) = load_subject(&path)?;
             let host_snapshot = HostSnapshot::capture(&HostProfile::probe());
 
@@ -359,8 +353,8 @@ fn command_oracle(invocation: &Invocation, translator: &Translator) -> CliResult
                 .record(record.clone())
                 .map_err(|error| error.to_string())?;
             if invocation.options.json {
-                print!(
-                    "{}\n",
+                println!(
+                    "{}",
                     to_pretty(
                         &compitum_json::Object::new()
                             .with("action", action.id())
@@ -469,7 +463,7 @@ fn command_locales(invocation: &Invocation, translator: &Translator) -> CliResul
                     "Fill in the values. Any key left empty falls back to English. \
                      Keys you do not translate are still counted in the coverage figure.",
                 );
-            print!("{}\n", to_pretty(&document.into()));
+            println!("{}", to_pretty(&document.into()));
             Ok(EXIT_OK)
         }
         other => Err(format!(
@@ -496,8 +490,8 @@ fn load_subject(path: &str) -> Result<(PeImage, Digest, u64), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let size = bytes.len() as u64;
     let digest = compitum_digest::sha256(&bytes);
-    let image = compitum_pe::parse(&bytes)
-        .map_err(|e| format!("{path} could not be classified: {e}"))?;
+    let image =
+        compitum_pe::parse(&bytes).map_err(|e| format!("{path} could not be classified: {e}"))?;
     Ok((image, digest, size))
 }
 
@@ -506,7 +500,9 @@ fn declared_requirements(options: &Options) -> Result<Vec<Requirement>, String> 
     let mut out = Vec::new();
     for id in &options.require_feature {
         let feature = IsaFeature::from_id(id).ok_or_else(|| {
-            format!("`{id}` is not a known ARM64 feature id; run `compitum host` for the vocabulary")
+            format!(
+                "`{id}` is not a known ARM64 feature id; run `compitum host` for the vocabulary"
+            )
         })?;
         out.push(Requirement::new(
             feature,
@@ -548,10 +544,15 @@ fn resolve_backends(options: &Options) -> BackendSet {
     set
 }
 
-/// Records a static analysis observation, unless suppressed.
+/// Records a static analysis observation, unless `--no-record` was passed.
 ///
-/// Failures are printed as a warning and never abort. A user on a read-only filesystem must
-/// still get their verdict.
+/// Recording is controlled by the explicit `--no-record` flag and by nothing else. In
+/// particular it is **not** suppressed by `--json`: the output format must never silently
+/// change a side effect, because the visible output would be identical either way and a user
+/// who stopped contributing to the dataset would never find out.
+///
+/// Failures are printed to stderr and never abort. A user on a read-only filesystem must still
+/// get their verdict, and stdout must stay valid for a JSON consumer.
 fn record_plan_if_requested(
     invocation: &Invocation,
     _translator: &Translator,
@@ -561,8 +562,7 @@ fn record_plan_if_requested(
     image: &PeImage,
     plan: Option<&compitum_router::Plan>,
 ) {
-    if invocation.options.no_record || invocation.options.json {
-        // JSON output is for consumers, who should not have a side effect imposed on them.
+    if invocation.options.no_record {
         return;
     }
     let path = invocation
@@ -620,7 +620,7 @@ fn record_plan_if_requested(
         now_unix(),
     );
 
-    match Ledger::open(&path).and_then(|mut ledger| ledger.record(record)) {
+    match Ledger::open(path).and_then(|mut ledger| ledger.record(record)) {
         Ok(_) => {}
         Err(error) => {
             eprintln!("compitum: not recorded: {error}");

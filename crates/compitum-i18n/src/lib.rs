@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use compitum_json::{Value, parse};
+use compitum_json::{parse, Value};
 
 /// Text direction of a locale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -193,7 +193,13 @@ impl Catalog {
                 "locale `{language}` contains no usable `messages` entries"
             ));
         }
-        Ok(Catalog::new(language, name, native_name, direction, messages))
+        Ok(Catalog::new(
+            language,
+            name,
+            native_name,
+            direction,
+            messages,
+        ))
     }
 
     /// Loads a locale from a file path.
@@ -490,7 +496,10 @@ impl LocaleStore {
     ///
     /// Returns a message when the tag is malformed or no file parses successfully.
     pub fn load(&self, tag: &str) -> Result<Catalog, String> {
-        if tag.is_empty() || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        if tag.is_empty()
+            || !tag
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err(format!("invalid locale tag `{tag}`"));
         }
@@ -720,7 +729,10 @@ mod tests {
     #[test]
     fn lookup_returns_english_for_base_locale() {
         let translator = Translator::english_only();
-        assert_eq!(translator.lookup("verdict.compatible"), Lookup::Exact("COMPATIBLE".into()));
+        assert_eq!(
+            translator.lookup("verdict.compatible"),
+            Lookup::Exact("COMPATIBLE".into())
+        );
         assert!(!translator.lookup("verdict.compatible").is_fallback());
     }
 
@@ -758,7 +770,10 @@ mod tests {
         let catalog = Catalog::from_json(source).unwrap();
         let translator = Translator::new(catalog);
 
-        assert_eq!(translator.lookup("verdict.compatible"), Lookup::Exact("OVERRIDDEN".into()));
+        assert_eq!(
+            translator.lookup("verdict.compatible"),
+            Lookup::Exact("OVERRIDDEN".into())
+        );
         let fallback = translator.lookup("verdict.incompatible");
         assert!(fallback.is_fallback());
         assert_eq!(fallback.text(), "INCOMPATIBLE");
@@ -772,8 +787,13 @@ mod tests {
             "messages": { "verdict.compatible": "A", "no.longer.used": "B" }
         }"#;
         let translator = Translator::new(Catalog::from_json(source).unwrap());
-        assert!(translator.missing_keys().contains(&"explain.native".to_owned()));
-        assert_eq!(translator.obsolete_keys(), vec!["no.longer.used".to_owned()]);
+        assert!(translator
+            .missing_keys()
+            .contains(&"explain.native".to_owned()));
+        assert_eq!(
+            translator.obsolete_keys(),
+            vec!["no.longer.used".to_owned()]
+        );
     }
 
     #[test]
@@ -808,9 +828,15 @@ mod tests {
 
     #[test]
     fn expands_language_tags() {
-        assert_eq!(expand_tag("fa_IR.UTF-8"), vec!["fa_IR".to_owned(), "fa".to_owned()]);
+        assert_eq!(
+            expand_tag("fa_IR.UTF-8"),
+            vec!["fa_IR".to_owned(), "fa".to_owned()]
+        );
         assert_eq!(expand_tag("en"), vec!["en".to_owned()]);
-        assert_eq!(expand_tag("de-DE"), vec!["de_DE".to_owned(), "de".to_owned()]);
+        assert_eq!(
+            expand_tag("de-DE"),
+            vec!["de_DE".to_owned(), "de".to_owned()]
+        );
         assert!(expand_tag("C").is_empty());
         assert!(expand_tag("POSIX").is_empty());
     }
