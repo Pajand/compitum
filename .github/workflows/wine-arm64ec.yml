@@ -60,12 +60,26 @@ jobs:
       - name: Install the build prerequisites
         run: |
           sudo apt-get update -qq
-          # Wine cross-compiles its PE side, and aarch64-windows is not a target this
-          # distribution's MinGW packages. clang, lld and llvm-dlltool are what configure
-          # accepts; without them it fails with "aarch64 PE compiler not found".
+          # Wine cross-compiles its PE side, and aarch64-windows is not a target Ubuntu's
+          # MinGW packages provide. configure asks for "mingw-w64, clang/llvm-dlltool/lld, or
+          # llvm-mingw"; clang plus lld satisfy it.
+          #
+          # `llvm-dlltool` is NOT a package name -- it is a binary that the `llvm` package
+          # provides. Listing it as one makes apt fail with "Unable to locate package", which
+          # is exactly how this workflow's first run failed.
           sudo apt-get install -y -qq \
             build-essential bison flex pkg-config python3 \
-            clang lld llvm llvm-dlltool gettext
+            clang lld llvm gettext
+
+          # Verify the tools the configure step needs are actually present, rather than
+          # discovering their absence hours later.
+          for tool in clang lld-link llvm-dlltool; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::$tool is missing; configure will refuse to cross-compile"
+              exit 1
+            fi
+            printf '%-14s %s\n' "$tool" "$(command -v "$tool")"
+          done
 
       - name: Report the toolchain
         run: |
