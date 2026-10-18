@@ -116,6 +116,47 @@ jobs:
           tar xf wine.tar.xz
           echo "WINE_SRC=$PWD/wine-${VERSION}" >> "$GITHUB_ENV"
 
+      - name: Remove the bundled FFmpeg before configure
+        run: |
+          cd "$WINE_SRC"
+          # Done BEFORE configure, and the ordering is the whole point.
+          #
+          # Measured behaviour, in order:
+          #   1. `--without-ffmpeg --without-gstreamer` leave libs/ffmpeg in the tree.
+          #   2. Patching EXTERNAL_SUBDIRS in the generated Makefile is undone, because the
+          #      Makefile carries `Makefile: Makefile.in config.status` and config.status is
+          #      always newer, so make regenerates it.
+          #   3. Passing EXTERNAL_SUBDIRS on the make command line does hold -- the step
+          #      reported "24 entries, ffmpeg absent" -- and make STILL compiled it:
+          #          Makefile:255504: libs/ffmpeg/arm64ec-windows/libavutil/adler32.o
+          #
+          # That last path is a rule in the TOP-LEVEL Makefile, so configure had generated
+          # explicit object rules for libs/ffmpeg regardless of EXTERNAL_SUBDIRS. No variable
+          # override can stop a rule that already exists.
+          #
+          # Removing the directory before configure means the rules are never generated, which
+          # is the only place this can be fixed.
+          #
+          # Its code is not needed: it feeds winegstreamer's media DLLs, which the configure
+          # flags below already disable. Proving ARM64EC execution needs the loader, ntdll and
+          # kernel32, not codecs.
+          #
+          # Its arm64ec slice also hits a clang/arm64ec header collision unrelated to Wine:
+          # arm64ec defines both __aarch64__ and the x64 ABI macros, so clang's arm_neon.h
+          # emits AArch32 polynomial types into a translation unit whose x64 side has already
+          # typed those names differently.
+          if [ -d libs/ffmpeg ]; then
+            echo "removing libs/ffmpeg ($(du -sh libs/ffmpeg | cut -f1))"
+            rm -rf libs/ffmpeg
+          fi
+          # The corresponding sub-makefiles reference it, so drop them too.
+          rm -f libs/ffmpeg/Makefile 2>/dev/null || true
+          if [ -d libs/ffmpeg ]; then
+            echo "::error::libs/ffmpeg still present"
+            exit 1
+          fi
+          echo "libs/ffmpeg removed before configure"
+
       - name: Configure with ARM64EC
         run: |
           cd "$WINE_SRC"
@@ -147,7 +188,7 @@ jobs:
           fi
           echo "ARM64EC is in the configured architecture list"
 
-      - name: Compute the subdirectory list without the bundled FFmpeg
+      - name: Verify the subdirectory list omits FFmpeg
         id: subdirs
         run: |
           cd "$WINE_SRC"
