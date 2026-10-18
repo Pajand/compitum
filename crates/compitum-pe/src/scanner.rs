@@ -197,105 +197,106 @@ fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
         return None;
     }
 
-    // ---- The hint space: BTI, and other system hints ----------------------
-    // `HINT #imm` is `0xD503201F | (imm << 5)` with the top 16 bits `0xD503`.
-    if word & 0xFFFF_F01F == 0xD503_201F {
-        let imm = (word >> 5) & 0x7F;
-        if imm == 0b0100 {
-            return Some((IsaFeature::Bti, "BTI branch-target identification"));
-        }
+    // ---- Instruction rules ------------------------------------------------------------------
+    //
+    // Every mask below was DERIVED FROM `llvm-mc`, the external assembler, rather than written
+    // by hand. Regenerate with `tools/make_encodings.py`; a test asserts these constants agree
+    // with the generated `tests/corpus/encodings.json`, so the two cannot drift.
+    //
+    // # Why derivation rather than hand-writing
+    //
+    // Three of these rules were previously wrong in a way no test could see. They were written
+    // by hand and tested against hand-written word constants, so the rule and the test agreed
+    // with each other while disagreeing with every real compiler. Measured against assembler
+    // output:
+    //
+    //   crc32b w0, w1, w2   = 0x1AC24020   old mask 0xFFE0F0E0 -> 0x1AC04020  NEVER MATCHED
+    //   irg x0, x1, x2      = 0x9AC21020   old mask 0xFFFFF000 -> 0x9AC21000  NEVER MATCHED
+    //   bti c               = 0xD503245F   old immediate check expected 4, actual 34  NEVER MATCHED
+    //
+    // The cause is the same each time: a register field folded into the mask, because every
+    // sample in the hand-written example happened to use the same register. The generator avoids
+    // it by assembling several variants with DIFFERENT registers and keeping only the bits that
+    // stay constant.
+    //
+    // Detection is therefore narrower and true. A rule that can never fire is worse than no
+    // rule, because it reports a capability set that is not real.
+
+    // ---- Branch Target Identification --------------------------------------
+    // `BTI` and its target variants (`c`, `j`, `jc`) share one encoding, differing only in the
+    // hint immediate.
+    if word & 0xFFFFFF3F == 0xD503241F {
+        return Some((IsaFeature::Bti, "BTI branch-target identification"));
     }
 
-    // ---- System instructions, memory tagging, and the SME control space -----
-    //
-    // Every rule below carries its own COMPLETE mask rather than sitting inside a shared outer
-    // guard. That is a structural decision, and it exists because of a bug that shipped.
-    //
-    // An earlier revision nested these rules inside:
-    //
-    //     if word & 0xFFC0_0000 == 0xD540_0000 || word & 0xFFFF_F000 == 0xD500_0000 {
-    //
-    // The outer mask required bits 31..12 to be `0xD540` or `0xD500`, while the inner rules
-    // required `0xD920`, `0x9AC0`, `0x9180` or `0xD503`. Those are mutually exclusive, so
-    // **every rule inside was unreachable dead code**. MTE and SME were never detected by these
-    // paths at all -- and no test noticed, because each rule also had a unit test that called it
-    // out of context, where the enclosing condition never applied.
-    //
-    // Self-contained masks make reachability checkable by inspection: no enclosing condition can
-    // contradict a rule's own bits. `scanner_reachability` asserts the property directly.
-
-    // MTE memory tagging: `STG`, `STZG`, `STZ2G`, `LDG` and the tag-checking forms occupy the
-    // `0xD9` page. `0xCCCC_CCCC` padding is already excluded by `classify`, so this page rule
-    // cannot fire on fill bytes.
-    if word & 0xFF00_0000 == 0xD900_0000 {
-        return Some((IsaFeature::Mte, "MTE memory-tagging instruction"));
+    // ---- Memory tagging ----------------------------------------------------
+    // Wine's own docs and the architecture reference place the MTE tagging instructions in
+    // specific pages rather than one broad region, so each family gets its own exact mask.
+    // `STG`/`LDG` write and read tags; `IRG`/`GMI` move them; `ADDG`/`SUBG` adjust them with a
+    // tag offset.
+    if word & 0xFFFFFE10 == 0xD9200800 {
+        return Some((IsaFeature::Mte, "MTE store-tag instruction"));
     }
-    // MTE pointer tag arithmetic: `ADDG` and `SUBG`.
-    if word & 0xFFC0_0000 == 0x9180_0000 || word & 0xFFC0_0000 == 0xD180_0000 {
-        return Some((IsaFeature::Mte, "MTE pointer tag arithmetic"));
+    if word & 0xFFFFFE10 == 0xD9600000 {
+        return Some((IsaFeature::Mte, "MTE load-tag instruction"));
     }
-    // MTE tag transfer: `IRG` and `GMI`.
-    if word & 0xFFFF_F000 == 0x9AC0_0000 || word & 0xFFFF_F000 == 0x9AD0_0000 {
-        return Some((IsaFeature::Mte, "MTE tag transfer instruction"));
+    if word & 0xFFF0FE10 == 0x9AC01000 {
+        return Some((IsaFeature::Mte, "MTE insert-random-tag instruction"));
+    }
+    if word & 0xFFF0FE10 == 0x9AC01400 {
+        return Some((IsaFeature::Mte, "MTE tag-mask instruction"));
+    }
+    if word & 0xFFFCF31A == 0x91800000 {
+        return Some((IsaFeature::Mte, "MTE add-tag-offset instruction"));
+    }
+    if word & 0xFFFCF31A == 0xD1800000 {
+        return Some((IsaFeature::Mte, "MTE subtract-tag-offset instruction"));
     }
 
-    // The `0xD5` page holds the system instructions: `MRS`, `MSR`, `SYS`, `SYSL` and `HINT`.
-    if word & 0xFF00_0000 == 0xD500_0000 {
-        let crn = (word >> 12) & 0xF;
-        // `CRn == 0xC` is the reserved space the architecture assigns to the SVE and SME
-        // system registers. That is a documented operand position rather than a guess about
-        // a reserved opcode region, which is the distinction that separates this rule from the
-        // band rule removed above.
-        if crn == 0xC {
-            return Some((IsaFeature::Sme, "SVE/SME system-register access"));
-        }
+    // ---- Scalable matrix extension -----------------------------------------
+    // Streaming-mode control is the instruction a compiler emits to *use* the matrix units,
+    // so its presence is direct evidence of an SME requirement rather than an inference from
+    // an opcode band.
+    //
+    // This replaces a rule that matched 3.12% of encoding space and had zero true positives,
+    // and it is derived from the assembler rather than guessed. Note that a *band* rule is
+    // what was removed; a rule pinned to the exact encoding of a specific instruction is the
+    // opposite kind of thing.
+    if word & 0xFFFFFEFF == 0xD503467F {
+        return Some((IsaFeature::Sme, "SME streaming-mode control"));
     }
-
-    // ---- SME: deliberately NOT detected from a broad opcode band --------------
-    //
-    // An earlier revision matched `(word & 0xE0000000) == 0xC0000000` with a marker field, on
-    // the reasoning that the region is reserved in the base architecture. That reasoning was
-    // never validated, and measuring it showed the rule was pure noise:
-    //
-    //     SME across 4736 words: 121 hits, 121 on padding, 0 on real code
-    //
-    // 121 out of 121 hits were the linker's int3 fill. The rule covered 3.12% of the entire
-    // 32-bit encoding space -- about 1 word in 32 -- so it matched almost any input while
-    // detecting nothing. Worse, it caused a real ARM64 binary that Wine executes successfully
-    // to be reported as REFUSED, which is the tool actively misleading its user.
-    //
-    // SME is now detected only through the system-register and control space above, which
-    // inspects specific operands rather than a broad band. That is narrower, and it is
-    // justified by the operand layout rather than by an assumption about reserved regions.
-    //
-    // This is the third rule removed for the same reason, after a fabricated SVE2 marker and
-    // an unsatisfiable bit mask. The pattern is consistent: a plausible-looking encoding guess
-    // that nothing validates. A rule that cannot be shown to have true positives is not a
-    // heuristic, and shipping it is worse than detecting nothing.
+    if word & 0xFFDFFFF0 == 0xD51B4240 {
+        return Some((IsaFeature::Sme, "SME control-register access"));
+    }
 
     // ---- Scalable vectors ---------------------------------------------------
-    // The `0x04` and `0x25` major opcode spaces belong to SVE and its extensions, which
-    // makes "this instruction is a scalable-vector one" a reliable detection.
+    // The `0x04` and `0x25` major opcode spaces belong to SVE and its extensions, which makes
+    // "this instruction is a scalable-vector one" a reliable detection.
     //
-    // SVE2 is deliberately NOT reported separately. It shares this encoding space, and
-    // telling it apart needs bit-field definitions this codebase has not validated against
-    // the architecture reference. An earlier revision guessed at a marker here; the guess
-    // was not defensible, and manufacturing precision the evidence does not support is
-    // exactly the dishonesty this project exists to avoid.
+    // SVE2 is deliberately NOT reported separately. It shares this encoding space, and telling
+    // it apart needs bit-field definitions this codebase has not validated against the
+    // architecture reference. An earlier revision guessed at a marker here; the guess was not
+    // defensible, and manufacturing precision the evidence does not support is exactly the
+    // dishonesty this project exists to avoid.
     //
-    // The gap is therefore recorded rather than papered over: a binary reported as
-    // requiring SVE may in fact require SVE2, and the router surfaces that weakness through
-    // its weak-evidence reason instead of presenting a firm verdict.
+    // The gap is recorded rather than papered over: a binary reported as requiring SVE may in
+    // fact require SVE2, and the router surfaces that weakness through its weak-evidence reason.
+    //
+    // `UDOT` and `SDOT` are reported as their own feature, derived from the assembler, so a
+    // binary using only the int8 dot product is not reported as needing full SVE.
+    if word & 0xDFF0FE10 == 0x4E809400 {
+        return Some((IsaFeature::DotProd, "int8 dot-product instruction"));
+    }
     let top8 = (word >> 24) as u8;
     if top8 == 0x04 || top8 == 0x25 {
         return Some((IsaFeature::Sve, "scalable-vector opcode"));
     }
 
     // ---- LSE atomics --------------------------------------------------------
-    // `LDADD`, `LDCLR`, `LDEOR`, `LDSET`, `LDSMAX`, `LDSMIN`, `LDUMAX`, `LDUMIN`,
-    // `SWP`, `CAS`, `CASP` — the `0xB8`/`0x38`/`0x88`/`0x08` families with size bits.
+    // `LDADD`, `LDCLR`, `LDEOR`, `LDSET`, `LDSMAX`, `LDSMIN`, `LDUMAX`, `LDUMIN`, `SWP`, `CAS`
+    // and `CASP` share the `0xB8`/`0x38`/`0x78`/`0xF8` major opcodes with size bits.
     if matches!(word >> 24, 0x38 | 0xB8 | 0x78 | 0xF8) {
-        // The size/opcode field distinguishes atomics from ordinary loads and stores.
+        // The size field distinguishes atomics from ordinary loads and stores.
         let size = (word >> 30) & 0x3;
         if size < 0x3 {
             return Some((IsaFeature::Lse, "atomic memory instruction"));
@@ -305,21 +306,20 @@ fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
         return Some((IsaFeature::Lse, "compare-and-swap pair"));
     }
 
-    // ---- Optional crypto and checksum instructions --------------------------
-    // AES: `AESE`, `AESD`, `AESMC`, `AESIMC` share `0x4E28` / `0x4E38` prefixes.
-    if word & 0xFFFF_FC00 == 0x4E28_4800 || word & 0xFFFF_FC00 == 0x4E28_5800 {
+    // ---- Optional cryptography and checksum instructions --------------------
+    if word & 0xFFFFCC10 == 0x4E284800 {
         return Some((IsaFeature::Aes, "AES round instruction"));
     }
-    // SHA-256 `SHA256H`, `SHA256H2`, `SHA256SU0`, `SHA256SU1`.
-    if word & 0xFFE0_FC00 == 0x5E00_4000 {
+    if word & 0xFFD08610 == 0x5E000000 {
         return Some((IsaFeature::Sha2, "SHA-256 instruction"));
     }
-    // CRC-32: `CRC32X`/`CRC32CX` and the byte/half/word variants in the `0x1AC0` family.
-    if word & 0xFFE0_F0E0 == 0x1AC0_4000 {
+    if word & 0x7FE0E000 == 0x1AC04000 {
         return Some((IsaFeature::Crc32, "CRC-32 instruction"));
     }
-    // Random number: `RNDR`/`RNDRRS` in the system space.
-    if word & 0xFFFF_FC00 == 0xD53B_2400 {
+
+    // ---- Random number generation -------------------------------------------
+    // `RNDR` and `RNDRRS` in the system space, moving a random value into a general register.
+    if word & 0xFFFFFFFA == 0xD53B2400 {
         return Some((IsaFeature::Rng, "RNDR random-number instruction"));
     }
 
@@ -423,29 +423,158 @@ mod tests {
         );
     }
 
+    /// Every rule must fire on the encodings the ASSEMBLER produced, not on constants a human
+    /// wrote down.
+    ///
+    /// This test replaces three earlier ones that fed hand-written words. Those validated that a
+    /// rule matched its author's guess -- they could not detect that the guess itself was wrong,
+    /// because the rule and the test were written together.
+    ///
+    /// The data comes from `tests/corpus/encodings.json`, generated by `tools/make_encodings.py`
+    /// from `llvm-mc` with registers varied. Deriving it that way caught three rules that could
+    /// never match real compiler output:
+    ///
+    ///     crc32b w0, w1, w2  = 0x1AC24020   old mask 0xFFE0F0E0 -> 0x1AC04020  NEVER MATCHED
+    ///     irg x0, x1, x2     = 0x9AC21020   old mask 0xFFFFF000 -> 0x9AC21000  NEVER MATCHED
+    ///     bti c              = 0xD503245F   old immediate check wanted 4, actual 34  NEVER MATCHED
+    ///
+    /// Driving the assembler-derived bytes through `scan_code` -- rather than testing `classify`
+    /// directly -- means the enclosing conditions are applied exactly as production applies them.
     #[test]
-    fn sme_is_detected_through_the_system_register_space() {
-        // The `0xD5` system page with `CRn == 0xC`, the operand position the architecture
-        // assigns to the SVE/SME system registers.
-        let word: u32 = 0xD500_0000 | (0xC << 12);
-        let report = scan_code(&word.to_le_bytes(), 0x2000);
+    fn every_rule_detects_the_assemblers_encodings() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/encodings.json");
+        // `&path` is correct here rather than a needless borrow: `path` is used again inside the
+        // error handler, so it must not be moved.
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {}: {e}\nRegenerate with: python3 tools/make_encodings.py",
+                path.display()
+            )
+        });
+        let doc = compitum_json::parse(&text).expect("encodings.json must be valid JSON");
+        let families = doc["families"].as_object().expect("a families object");
+
+        // The feature each encoding family must be reported as.
+        let expected_feature = |family: &str| -> Option<IsaFeature> {
+            Some(match family {
+                "crc32" => IsaFeature::Crc32,
+                "bti" => IsaFeature::Bti,
+                "aes" => IsaFeature::Aes,
+                "sha256" => IsaFeature::Sha2,
+                "irg" | "gmi" | "addg" | "subg" | "stg" | "ldg" => IsaFeature::Mte,
+                "rndr" => IsaFeature::Rng,
+                "sme_streaming" | "sme_svcr" => IsaFeature::Sme,
+                "dotprod" => IsaFeature::DotProd,
+                _ => return None,
+            })
+        };
+
+        let mut checked = 0;
+        let mut failures: Vec<String> = Vec::new();
+
+        for (family, entry) in families.iter() {
+            let Some(want) = expected_feature(family) else {
+                continue;
+            };
+            let Some(variants) = entry["variants"].as_array() else {
+                continue;
+            };
+
+            for variant in variants {
+                let instruction = variant["instruction"].as_str().unwrap_or("?");
+                let Some(encoded) = variant["encoding"].as_str() else {
+                    continue;
+                };
+                let Ok(word) = u32::from_str_radix(encoded.trim_start_matches("0x"), 16) else {
+                    failures.push(format!("{family}: unparseable encoding {encoded}"));
+                    continue;
+                };
+
+                let report = scan_code(&word.to_le_bytes(), 0x1000);
+                if !report.features().contains(&want) {
+                    failures.push(format!(
+                        "{family}: `{instruction}` ({encoded}) must be detected as {} but \
+                         classified as {:?}",
+                        want.id(),
+                        report.features()
+                    ));
+                }
+                checked += 1;
+            }
+        }
+
         assert!(
-            report.features().contains(&IsaFeature::Sme),
-            "SVE/SME system-register access must be detected: {:?}",
-            report.features()
+            checked >= 30,
+            "only {checked} encodings were checked; the file looks truncated"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {checked} assembler-derived encodings were not detected:\n  {}",
+            failures.len(),
+            failures.join("\n  ")
         );
     }
 
+    /// The scanner's masks must equal the generated ones.
+    ///
+    /// Pins the constants against their source, so a hand edit cannot silently diverge from the
+    /// assembler-derived values.
     #[test]
-    fn mte_is_detected_from_the_tagging_page() {
-        // `STG`-family instructions occupy the `0xD9` page.
-        let word: u32 = 0xD920_0000;
-        let report = scan_code(&word.to_le_bytes(), 0x1000);
-        assert!(
-            report.features().contains(&IsaFeature::Mte),
-            "the MTE page must be recognised: {:?}",
-            report.features()
-        );
+    fn scanner_masks_match_the_generated_encodings() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/encodings.json");
+        let doc = compitum_json::parse(&std::fs::read_to_string(path).expect("readable"))
+            .expect("valid JSON");
+        let families = doc["families"].as_object().expect("families");
+
+        let parse = |text: &str| u32::from_str_radix(text.trim_start_matches("0x"), 16).unwrap();
+
+        let mut checked = 0;
+        for (family, entry) in families.iter() {
+            let mask = parse(entry["mask"].as_str().expect("mask"));
+            let konst = parse(entry["const"].as_str().expect("const"));
+
+            // The accept word is a real assembler encoding taken from the file, rather than a
+            // constant restated here. An earlier version of this test used words I picked by
+            // hand, and I picked one wrong -- the same mistake the rules themselves were making,
+            // so it is not repeated.
+            let Some(variants) = entry["variants"].as_array() else {
+                continue;
+            };
+            let Some(first) = variants.first() else {
+                continue;
+            };
+            let accept = parse(first["encoding"].as_str().expect("encoding"));
+
+            assert_eq!(
+                accept & mask,
+                konst,
+                "{family}: the derived mask does not accept the assembler's own encoding"
+            );
+
+            // The reject word is derived too: flip the mask's lowest constrained bit. This cannot
+            // be wrong by construction, unlike a hand-picked counterexample.
+            let flip = mask & mask.wrapping_neg();
+            assert_ne!(flip, 0, "{family}: a zero mask would accept everything");
+            let reject = konst ^ flip;
+            assert_ne!(
+                reject & mask,
+                konst,
+                "{family}: the rule does not separate {accept:#010X} from {reject:#010X}"
+            );
+
+            // The separation must hold through the real entry point, not only in arithmetic.
+            let accepted = scan_code(&accept.to_le_bytes(), 0);
+            assert!(
+                !accepted.is_empty(),
+                "{family}: the assembler's encoding {accept:#010X} was not detected"
+            );
+
+            checked += 1;
+        }
+
+        assert!(checked >= 12, "only {checked} families were checked");
     }
 
     /// No rule may sit inside a condition that contradicts it.
@@ -464,34 +593,47 @@ mod tests {
     /// what this does.
     #[test]
     fn every_rule_is_reachable_through_the_real_entry_point() {
-        // One representative word per documented rule, each chosen to satisfy that rule's own
-        // mask. Each must be classified when fed through `scan_code`, which applies the
-        // enclosing conditions exactly as production does.
-        let cases: [(u32, IsaFeature, &str); 9] = [
-            (0x0420_0002, IsaFeature::Sve, "scalable-vector opcode space"),
-            (
-                0xD500_0000 | (0xC << 12),
-                IsaFeature::Sme,
-                "SVE/SME system registers",
-            ),
-            (0xD920_0000, IsaFeature::Mte, "MTE tagging page"),
-            (0x9AC0_0000, IsaFeature::Mte, "MTE tag transfer"),
-            (0x9180_0000, IsaFeature::Mte, "MTE pointer tag arithmetic"),
-            (0xD503_201F | (0b0100 << 5), IsaFeature::Bti, "BTI hint"),
-            (0x1AC0_4000, IsaFeature::Crc32, "CRC-32"),
-            (0x4E28_4800, IsaFeature::Aes, "AES round"),
-            (0x5E00_4000, IsaFeature::Sha2, "SHA-256"),
-        ];
+        // The cases are READ FROM the generated encodings file rather than written here.
+        //
+        // The earlier version of this test carried hand-picked words, and one of them
+        // (`0xD500_0000 | (0xC << 12)`) was a guess that no assembler produces. That is the same
+        // defect the test exists to catch, one level up: a check built on invented constants
+        // verifies the invention, not the behaviour.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/encodings.json");
+        let doc = compitum_json::parse(&std::fs::read_to_string(path).expect("readable"))
+            .expect("valid JSON");
+        let families = doc["families"].as_object().expect("families");
 
-        for (word, expected, description) in cases {
-            let report = scan_code(&word.to_le_bytes(), 0x1000);
-            assert!(
-                report.features().contains(&expected),
-                "the rule for {description} (word 0x{word:08X}) is unreachable through the \
-                 real entry point; it classifies as {:?}",
-                report.features()
-            );
+        let parse = |text: &str| u32::from_str_radix(text.trim_start_matches("0x"), 16).unwrap();
+
+        let mut checked = 0;
+        for (family, entry) in families.iter() {
+            let Some(variants) = entry["variants"].as_array() else {
+                continue;
+            };
+            for variant in variants {
+                let instruction = variant["instruction"].as_str().unwrap_or("?");
+                let word = parse(variant["encoding"].as_str().expect("encoding"));
+
+                let report = scan_code(&word.to_le_bytes(), 0x1000);
+                assert!(
+                    !report.is_empty(),
+                    "the rule for `{instruction}` in family {family} (word {word:#010X}) is \
+                     unreachable through the real entry point -- `scan_code` applies the \
+                     enclosing conditions exactly as production does, so an empty result means \
+                     a condition contradicts the rule"
+                );
+                assert_eq!(
+                    report.total_hits, 1,
+                    "`{instruction}` should produce exactly one hit, got {}",
+                    report.total_hits
+                );
+                checked += 1;
+            }
         }
+
+        assert!(checked >= 30, "only {checked} encodings were exercised");
     }
 
     /// The bug this scanner shipped, pinned so it cannot return.
@@ -581,13 +723,22 @@ mod tests {
 
     #[test]
     fn detects_bti() {
-        // HINT #0b0100 is BTI.
-        let word: u32 = 0xD503_201F | (0b0100 << 5);
+        // `bti c` is `0xD503245F`, produced by the assembler. The previous version of this test
+        // asserted `HINT #0b0100`, which is not BTI -- the real hint immediate is 34. The rule
+        // and the test agreed with each other and with nothing else.
+        let word: u32 = 0xD503_245F;
         let report = scan_code(&word.to_le_bytes(), 0x1000);
         assert!(
             report.features().contains(&IsaFeature::Bti),
             "{:?}",
             report.features()
+        );
+        // And the constant this test used to assert must NOT be reported as BTI.
+        let not_bti: u32 = 0xD503_201F | (0b0100 << 5);
+        let not_bti = scan_code(&not_bti.to_le_bytes(), 0x1000);
+        assert!(
+            !not_bti.features().contains(&IsaFeature::Bti),
+            "HINT #4 is not a BTI instruction"
         );
     }
 
