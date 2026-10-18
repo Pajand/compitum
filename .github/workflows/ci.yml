@@ -229,5 +229,12 @@ jobs:
       - name: Every reference must agree with identity.toml
         run: python3 tools/identity.py --check
 
+      # `--check` is only as trustworthy as its own behaviour, and the tool's failure modes
+      # are silent ones: a rule that matches nothing, a check that writes, a swap that leaves
+      # two documents disagreeing. The tests were each written against a defect that was
+      # actually observed, so they are the reason the gate above can be believed.
+      - name: The identity tool's own tests must pass
+        run: python3 tools/test_identity.py
+
       - name: No credential-shaped strings in the tree
         run: python3 .github/scripts/check_secrets.py .

@@ -21,15 +21,26 @@
 #   domain = "compitum.dev"
 domain = ""
 
+# The Oracle API base, published only once the service is actually deployed.
+#
+# Deliberately NOT derived from `domain`. Registering a domain and running an API are two
+# different facts, and inferring the second from the first would publish a dead endpoint in
+# the machine-readable identity block the moment the domain is bought. Leave empty until
+# `api.<domain>` resolves and answers; then set it, e.g.:
+#   api_base = "https://api.compitum.dev"
+api_base = ""
+
 # The canonical source repository. This never changes, even after the domain exists:
 # a source link should point at the source.
 repository = "https://github.com/compitum-dev/compitum"
 
 # The human-facing contact address.
 #
-# Transitional value until the domain exists, at which point mail should move to
-# `hello@<domain>` and this becomes the forwarding source. Both may be listed so the
-# transition is invisible to anyone who wrote to the old address.
+# This is NOT derived from `domain`, on purpose. Buying a domain and having mail forwarding
+# work are different facts: a security report sent to a mailbox that does not exist yet is a
+# harm with no upside. When forwarding is live, change this one field to `hello@<domain>`
+# (keeping the Gmail address as the forwarding source), re-run the tool, and every document
+# follows -- `tools/identity.py --check` fails if any of them disagrees.
 contact_email = "compitum.dev@gmail.com"
 
 # The name used in prose and in package descriptions.

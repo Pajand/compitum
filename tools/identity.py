@@ -90,6 +90,7 @@ class Identity:
         self.tagline: str = raw["tagline"]
         self.license: str = raw.get("license", "MIT OR Apache-2.0")
         self.copyright: str = raw.get("copyright", "")
+        self.api_base: str = raw.get("api_base", "")
 
     @property
     def has_domain(self) -> bool:
@@ -107,20 +108,26 @@ class Identity:
 
     @property
     def api(self) -> str | None:
-        """The Oracle API base, or `None` while no domain exists.
+        """The Oracle API base, advertised only once it is explicitly deployed.
 
-        An API cannot be advertised at a GitHub URL, so this stays absent rather than
-        pointing somewhere wrong.
+        `None` unless `api_base` is set in `identity.toml`. Deriving it from the domain
+        would publish `https://api.<domain>` the moment a domain is registered -- before a
+        DNS record for that name exists and before the service does. A registered domain is
+        one fact; a running API is another, and inferring the second from the first puts a
+        dead endpoint into a machine-readable block.
         """
-        return f"https://api.{self.domain}" if self.has_domain else None
-
-    @property
-    def api_email(self) -> str | None:
-        return f"hello@{self.domain}-noreply" if self.has_domain else None
+        return self.api_base or None
 
     @property
     def mail(self) -> str:
-        return f"hello@{self.domain}" if self.has_domain else self.contact_email
+        """The contact address, exactly as configured.
+
+        Deliberately *not* derived from the domain. Buying a domain and having mail
+        forwarding work are different facts, and a security report sent to a mailbox that
+        does not exist yet is a harm with no upside. When forwarding is live, `contact_email`
+        is changed to the new address: one field, one deliberate act.
+        """
+        return self.contact_email
 
     @property
     def container(self) -> str:
@@ -170,10 +177,20 @@ def rules(identity: Identity):
             # published in the repository profile", which makes a reporter hunt for where
             # to send a vulnerability report -- the worst possible friction at the worst
             # possible moment. The rule replaces that vagueness with the derived address.
+            # The pattern must match *any* existing address as well as the old vague
+            # sentence. An earlier version matched only the sentence, which made it a
+            # one-shot migration: after a single run the file held a literal address, the
+            # pattern no longer matched, and a later domain change left SECURITY.md
+            # advertising the old mailbox while the README advertised the new one. Two
+            # published documents contradicted each other and `--check` stayed green,
+            # because "the pattern matched nothing" was reported as success. There is a
+            # regression guard for this in `tools/test_identity.py`.
             re.compile(
-                r"(or by email to the\s+)address published in the repository profile\."
+                r"(or by email to the\s+)"
+                r"(?:address published in the repository profile|[\w.+-]+@[\w.-]+)"
+                r"(\.)"
             ),
-            lambda m: f"{m.group(1)}{identity.mail}.",
+            lambda m: f"{m.group(1)}{identity.mail}{m.group(2)}",
             "SECURITY.md contact address",
         ),
     ]
@@ -194,6 +211,26 @@ def identity_block(identity: Identity) -> str:
         fields["api"] = identity.api
     body = "\n".join(f"{k}: {v}" for k, v in fields.items())
     return f"<!-- identity:begin -->\n```yaml\n{body}\n```\n<!-- identity:end -->"
+
+
+def check_security_contact() -> list:
+    """A vulnerability reporter must always have somewhere to send a report.
+
+    If SECURITY.md is reworded so that no address can be found, the rewrite rule above
+    matches nothing and silently does nothing -- and a security report arrives nowhere.
+    Absence of an address is therefore a hard failure rather than "no match".
+    """
+    path = REPO_ROOT / "SECURITY.md"
+    if not path.is_file():
+        return ["SECURITY.md is missing, so there is no documented way to report a vulnerability"]
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if re.search(r"or by email to the\s+[\w.+-]+@[\w.-]+", text):
+        return []
+    return [
+        "SECURITY.md names a contact route but no email address, so a vulnerability "
+        "report would arrive nowhere"
+    ]
 
 
 def iter_files():
@@ -325,6 +362,7 @@ def main() -> int:
 
     rule_set = rules(identity)
     hits_per_rule = {description: 0 for _, _, description in rule_set}
+    matches_per_rule = {description: 0 for _, _, description in rule_set}
     changes = []
 
     for path in iter_files():
@@ -332,11 +370,12 @@ def main() -> int:
         text = original
         for pattern, build, description in rule_set:
             def replace(match):
-                # Count *effective* rewrites, not pattern matches. A rule whose replacement
-                # equals the text it matched changed nothing, and reporting that as a hit
-                # makes `--check` claim drift where there is none -- a report describing an
-                # intent instead of an event.
+                # Distinguish "the pattern found nothing" from "the pattern found something
+                # that already agreed". Only the second means the repository is in sync, and
+                # only a genuine difference is a hit. Collapsing the two is how a one-shot
+                # rule came to report success while two documents disagreed.
                 replacement = build(match)
+                matches_per_rule[description] += 1
                 if replacement != match.group(0):
                     hits_per_rule[description] += 1
                 return replacement
@@ -350,6 +389,7 @@ def main() -> int:
             print(f"  unchanged: {path.relative_to(REPO_ROOT)}")
 
     inserted, problems = ensure_readme_block(identity, apply)
+    problems.extend(check_security_contact())
     if inserted:
         note = "identity block inserted" if apply else "identity block would be inserted"
         changes.append(f"README.md ({note})")
@@ -365,12 +405,15 @@ def main() -> int:
     # digging out elsewhere: a report that describes an intent rather than an event.
     print("rewrite rules:")
     for _, _, description in rule_set:
-        count = hits_per_rule.get(description, 0)
-        if not count:
+        hits = hits_per_rule.get(description, 0)
+        matches = matches_per_rule.get(description, 0)
+        if not matches:
             state = "no match"
+        elif not hits:
+            state = "no change"
         else:
             state = "applied" if apply else "would apply"
-        print(f"  {description:<32} {count:>3} hit(s)  [{state}]")
+        print(f"  {description:<32} {hits:>3} hit(s)  [{state}]")
 
     print()
     print(f"files changed: {len(changes)}" if apply else f"files out of sync: {len(changes)}")
