@@ -104,6 +104,143 @@ OFF_DLL_CHARACTERISTICS = 0x46
 OFF_RVA_AND_SIZES_PE32PLUS = 0x6C
 OFF_DATA_DIRECTORY = 0x70
 
+# CHPE metadata offsets. These MUST match `crates/compitum-pe/src/chpe.rs`, which is the
+# implementation under test: the corpus records what an independent reader sees, and the test
+# asserts the two agree.
+#
+# `OFF_CHPE_METADATA_POINTER` is inside `IMAGE_LOAD_CONFIG_DIRECTORY64`; the other three are
+# inside `IMAGE_ARM64EC_METADATA`.
+OFF_CHPE_METADATA_POINTER = 0xC8
+OFF_CHPE_VERSION = 0x00
+OFF_CHPE_CODE_MAP = 0x04
+OFF_CHPE_CODE_MAP_COUNT = 0x08
+
+# The smallest load configuration that can contain `CHPEMetadataPointer`. A shorter directory
+# simply does not have the field, which is ordinary rather than an error.
+MIN_LOAD_CONFIG_FOR_CHPE = 0xD0
+
+
+# ---------------------------------------------------------------------------
+# CHPE fixtures.
+#
+# lld-link can link an ARM64X image, but without a Windows CRT to supply the
+# `__arm64x_*` symbols it leaves the load configuration empty, so no CHPE metadata is
+# emitted. That is a toolchain limitation, not an unsupported format.
+#
+# These two fixtures are therefore constructed here. Their layout is validated by
+# `llvm-readobj --coff-load-config`, an independent implementation that parses the
+# metadata, resolves the code map and names the format. That is what makes them
+# evidence rather than assertion: a wrong offset would be reported as an error, as it
+# was during development when the code-map RVA did not resolve.
+# ---------------------------------------------------------------------------
+
+def build_chpe_fixture(machine: int, chpe_version: int, code_map_types: list) -> bytes:
+    """
+    Builds a PE32+ image carrying CHPE metadata of the given version.
+
+    `code_map_types` is a list of CHPE code-map type values: 0 for AArch64-derived code,
+    1 for x86-64 code. The map is what the loader uses to decide which pages are which,
+    and its length is the most decision-relevant number in the structure.
+
+    CHPEMetadataPointer is written as a VIRTUAL ADDRESS, not an RVA. Reading it as an RVA
+    is a documented mistake and lands in the wrong place on every image whose base is not
+    zero, which is every real image.
+    """
+    section_align = 0x1000
+    file_align = 0x200
+    pe_offset = 0x80
+    optional_size = 0xF0
+    section_count = 1
+    raw_offset = file_align
+    total = raw_offset + section_align * 2
+
+    data = bytearray(total)
+    data[0:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, pe_offset)
+    data[pe_offset:pe_offset + 4] = b"PE\0\0"
+
+    coff = pe_offset + 4
+    struct.pack_into("<H", data, coff, machine)
+    struct.pack_into("<H", data, coff + 2, section_count)
+    struct.pack_into("<H", data, coff + 16, optional_size)
+    struct.pack_into("<H", data, coff + 18, 0x0002)  # IMAGE_FILE_EXECUTABLE_IMAGE
+
+    opt = coff + 20
+    struct.pack_into("<H", data, opt + OFF_MAGIC, 0x20B)  # PE32+
+    struct.pack_into("<Q", data, opt + 0x18, 0x140000000)  # ImageBase
+    struct.pack_into("<I", data, opt + OFF_SECTION_ALIGNMENT, section_align)
+    struct.pack_into("<I", data, opt + 0x24, file_align)  # FileAlignment
+    struct.pack_into("<I", data, opt + OFF_SIZE_OF_IMAGE, 0x3000)
+    struct.pack_into("<I", data, opt + OFF_SIZE_OF_HEADERS, file_align)
+    struct.pack_into("<H", data, opt + OFF_SUBSYSTEM, 3)  # console
+    struct.pack_into("<I", data, opt + OFF_RVA_AND_SIZES_PE32PLUS, 16)
+
+    data_directory = opt + OFF_DATA_DIRECTORY
+    load_config_rva = section_align + 0x100
+    struct.pack_into("<II", data, data_directory + 10 * 8,
+                     load_config_rva, MIN_LOAD_CONFIG_FOR_CHPE + 8)
+
+    section = opt + optional_size
+    data[section:section + 5] = b".text"
+    struct.pack_into("<I", data, section + 8, 0x2000)         # VirtualSize
+    struct.pack_into("<I", data, section + 12, section_align)  # VirtualAddress
+    struct.pack_into("<I", data, section + 16, 0x2000)        # SizeOfRawData
+    struct.pack_into("<I", data, section + 20, raw_offset)    # PointerToRawData
+    struct.pack_into("<I", data, section + 36, 0x60000020)    # code | execute | read
+
+    def file_offset(rva: int) -> int:
+        return raw_offset + (rva - section_align)
+
+    metadata_rva = section_align + 0x200
+    code_map_rva = section_align + 0x400
+
+    # The code map: 12 bytes per entry, an inclusive RVA range plus a type.
+    code_map_offset = file_offset(code_map_rva)
+    for index, code_type in enumerate(code_map_types):
+        start = section_align + index * 0x40
+        struct.pack_into("<III", data, code_map_offset + index * 12,
+                         start, start + 0x40, code_type)
+
+    metadata_offset = file_offset(metadata_rva)
+    struct.pack_into("<I", data, metadata_offset + OFF_CHPE_VERSION, chpe_version)
+    struct.pack_into("<I", data, metadata_offset + OFF_CHPE_CODE_MAP, code_map_rva)
+    struct.pack_into("<I", data, metadata_offset + OFF_CHPE_CODE_MAP_COUNT,
+                     len(code_map_types))
+
+    load_config_offset = file_offset(load_config_rva)
+    struct.pack_into("<I", data, load_config_offset, MIN_LOAD_CONFIG_FOR_CHPE + 8)
+    struct.pack_into("<Q", data, load_config_offset + OFF_CHPE_METADATA_POINTER,
+                     0x140000000 + metadata_rva)
+
+    return bytes(data)
+
+
+def llvm_says(path: str) -> dict:
+    """
+    Asks llvm-readobj what it thinks the file is.
+
+    The returned `format` is the independent verdict: `COFF-ARM64EC` or `COFF-ARM64X`.
+    A wrong metadata layout produces an error instead, which is exactly the feedback
+    that makes these hand-built fixtures trustworthy.
+    """
+    result = run(["llvm-readobj", "--file-headers", "--coff-load-config", path])
+    text = result.stdout + result.stderr
+
+    fmt = ""
+    for line in text.splitlines():
+        if line.startswith("Format:"):
+            fmt = line.split(":", 1)[1].strip()
+            break
+    version = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Version:") and version is None:
+            try:
+                version = int(stripped.split(":", 1)[1].strip(), 16)
+            except ValueError:
+                pass
+    return {"format": fmt, "chpe_version": version, "errors": "error" in text.lower()}
+
 
 def run(command: list, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(command, capture_output=True, text=True, check=False, **kwargs)
@@ -221,6 +358,80 @@ def main() -> int:
         print(f"  {name:<26} machine=0x{fields['machine']:04X} "
               f"subsystem={fields['subsystem']} align={fields['section_alignment']:>6} "
               f"sections={names}")
+
+    # -----------------------------------------------------------------------
+    # The CHPE fixtures. Built here rather than by the linker, because lld-link cannot
+    # emit CHPE metadata without a Windows CRT to supply the `__arm64x_*` symbols: it
+    # links the file but leaves the load configuration empty.
+    #
+    # Their layout is validated by llvm-readobj, an independent implementation that
+    # parses the metadata, resolves the code map and names the format. That independent
+    # verdict is the whole point: if an offset were wrong it would report an error, as it
+    # did during development when the code-map RVA did not resolve.
+    # -----------------------------------------------------------------------
+    if not have("llvm-readobj"):
+        problems.append(
+            "llvm-readobj is required to validate the CHPE fixtures; without an independent "
+            "reader their layout would only be asserted, not checked"
+        )
+
+    chpe_cases = [
+        # (filename, machine, CHPE version, code-map types, expected llvm format)
+        #
+        # ARM64EC: an x86-64 machine type plus version-1 metadata. This is the case machine
+        # type alone cannot identify, because the header is identical to plain x86-64.
+        ("chpe-arm64ec.exe", 0x8664, 1, [0, 0, 1], "COFF-ARM64EC"),
+        # ARM64X: an ARM64 machine type plus version-2 metadata.
+        ("chpe-arm64x.exe", 0xAA64, 2, [0, 1, 0, 1], "COFF-ARM64X"),
+    ]
+
+    for name, machine, version, code_map, expected_format in chpe_cases:
+        out = os.path.join(CORPUS, name)
+        with open(out, "wb") as handle:
+            handle.write(build_chpe_fixture(machine, version, code_map))
+
+        verdict = llvm_says(out)
+        if verdict["errors"]:
+            problems.append(
+                f"{name}: llvm-readobj reported an error reading the CHPE metadata, which "
+                "means the layout this script wrote does not match the format"
+            )
+        if verdict["format"] != expected_format:
+            problems.append(
+                f"{name}: llvm-readobj calls this {verdict['format']!r}, expected "
+                f"{expected_format!r}. The independent reader disagrees with the intended "
+                "classification."
+            )
+        if verdict["chpe_version"] != version:
+            problems.append(
+                f"{name}: llvm-readobj read CHPE version {verdict['chpe_version']!r}, "
+                f"expected {version!r}"
+            )
+
+        fields = read_fields(out)
+        names = section_names(out)
+        manifest[name] = {
+            "sha256": None,  # filled below
+            "size": fields["size"],
+            "machine": fields["machine"],
+            "subsystem": fields["subsystem"],
+            "section_alignment": fields["section_alignment"],
+            "size_of_image": fields["size_of_image"],
+            "size_of_headers": fields["size_of_headers"],
+            "dll_characteristics": fields["dll_characteristics"],
+            "rva_and_sizes": fields["rva_and_sizes"],
+            "load_config_rva": fields["load_config_rva"],
+            "load_config_size": fields["load_config_size"],
+            "sections": names,
+            "source": "constructed by this script",
+            "chpe_version": version,
+            "chpe_code_map_count": len(code_map),
+            # Recorded from the independent reader, not from the builder's intent.
+            "llvm_readobj_format": verdict["format"],
+        }
+        print(f"  {name:<26} machine=0x{fields['machine']:04X} "
+              f"chpe_version={version} code_map={len(code_map)} "
+              f"llvm_readobj_says={verdict['format']}")
 
     if problems:
         print()

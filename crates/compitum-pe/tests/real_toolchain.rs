@@ -61,13 +61,25 @@ fn parse_corpus(name: &str) -> PeImage {
     parse(&bytes).unwrap_or_else(|error| panic!("{name} failed to parse: {error}"))
 }
 
-/// The four fixtures the corpus is expected to hold.
+/// The four fixtures produced directly by clang and lld-link.
 const CORPUS_FILES: [&str; 4] = [
     "real-console-4k.exe",
     "real-gui-4k.exe",
     "real-console-16k.exe",
     "real-arm64ec.exe",
 ];
+
+/// Two fixtures constructed by `tools/make_corpus.py` rather than by the linker.
+///
+/// lld-link can link an ARM64X image, but without a Windows CRT to supply the `__arm64x_*`
+/// symbols it leaves the load configuration empty, so no CHPE metadata is emitted. The
+/// metadata therefore has to be written by hand -- and validated by `llvm-readobj`, an
+/// independent implementation that parses it, resolves the code map and names the format.
+///
+/// That independent verdict is what makes these evidence rather than assertion. If an offset
+/// were wrong, llvm-readobj would report an error rather than a format name, which is exactly
+/// what happened during development when the code-map RVA did not resolve.
+const CHPE_FILES: [&str; 2] = ["chpe-arm64ec.exe", "chpe-arm64x.exe"];
 
 // ===========================================================================
 // The regression this file was written for.
@@ -273,7 +285,14 @@ fn parser_agrees_with_the_independent_manifest() {
         checked += 1;
     }
 
-    assert_eq!(checked, CORPUS_FILES.len());
+    // Derive the expectation from both lists rather than one. The CHPE fixtures are listed
+    // separately because they are constructed rather than linked, and an assertion against
+    // only one list would silently skip the other.
+    assert_eq!(
+        checked,
+        CORPUS_FILES.len() + CHPE_FILES.len(),
+        "every corpus file must be compared against the independent reading"
+    );
 }
 
 /// Each corpus file's digest must match the manifest.
@@ -291,8 +310,9 @@ fn corpus_files_match_their_recorded_digests() {
 
     assert_eq!(
         files.len(),
-        CORPUS_FILES.len(),
-        "the manifest and the expected file list have diverged"
+        CORPUS_FILES.len() + CHPE_FILES.len(),
+        "the manifest and the expected file list have diverged; a fixture was added or removed \
+         without updating the list that says what the corpus is for"
     );
 
     for (name, entry) in files.iter() {
@@ -482,4 +502,180 @@ fn only_four_machine_values_consult_the_hybrid_classifier() {
     // And the ARM64 case still works end to end.
     let arm64 = parse(&synthetic(machine::ARM64, subsystem::CONSOLE, false)).expect("parses");
     assert_eq!(arm64.family().id(), "arm64");
+}
+
+// ===========================================================================
+// CHPE hybrid detection, against an independent reader's verdict.
+// ===========================================================================
+
+/// The manifest records what `llvm-readobj` calls each file, and our reader must agree.
+///
+/// This is the strongest evidence in the crate. `llvm-readobj` is an independent
+/// implementation of the same format; it knows nothing about this code. When it says
+/// `COFF-ARM64EC` for a file our reader classifies as ARM64EC, two separate implementations
+/// have reached the same conclusion from the same bytes.
+///
+/// The opposite is also true: the manifest records the *independent* verdict precisely so
+/// that a disagreement fails here rather than being smoothed over.
+#[test]
+fn our_reader_agrees_with_llvm_readobj_on_every_hybrid_file() {
+    let path = corpus_dir().join("manifest.json");
+    let text = std::fs::read_to_string(path).expect("manifest must exist");
+    let manifest = compitum_json::parse(&text).expect("valid JSON");
+    let files = manifest["files"]
+        .as_object()
+        .expect("manifest has a files object");
+
+    // What our family identifier must be, given what llvm-readobj called the file.
+    let expected_for = |llvm_format: &str| -> Option<&'static str> {
+        match llvm_format {
+            "COFF-ARM64EC" => Some("arm64ec"),
+            "COFF-ARM64X" => Some("arm64x"),
+            "COFF-ARM64" => Some("arm64"),
+            _ => None,
+        }
+    };
+
+    let mut checked = 0;
+    for name in CHPE_FILES.iter().chain(CORPUS_FILES.iter()) {
+        let entry = files
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is missing from the manifest"));
+        let Some(llvm_format) = entry["llvm_readobj_format"].as_str() else {
+            // The linker-produced fixtures have no recorded llvm verdict, which is expected:
+            // their classification follows from the machine field alone.
+            continue;
+        };
+        let Some(expected) = expected_for(llvm_format) else {
+            panic!("the manifest records an unrecognized llvm format {llvm_format:?} for {name}");
+        };
+
+        let image = parse_corpus(name);
+        assert_eq!(
+            image.family().id(),
+            expected,
+            "{name}: llvm-readobj calls this {llvm_format}, so our reader must report \
+             `{expected}`; two independent implementations disagreeing about the same bytes is \
+             the one thing this corpus exists to detect"
+        );
+        assert!(
+            image.is_hybrid(),
+            "{name}: {llvm_format} denotes a hybrid image, so the CHPE metadata must have been \
+             read"
+        );
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked,
+        CHPE_FILES.len(),
+        "every CHPE fixture must carry an independent verdict in the manifest"
+    );
+}
+
+/// The decisive case: an ARM64EC file is indistinguishable from x86-64 by machine type.
+#[test]
+fn arm64ec_is_identified_only_by_its_chpe_metadata() {
+    let arm64ec = parse_corpus("chpe-arm64ec.exe");
+
+    // The machine field says x86-64, and it is telling the truth about the header.
+    assert_eq!(
+        arm64ec.coff.machine.raw(),
+        0x8664,
+        "an ARM64EC executable carries the x86-64 machine type"
+    );
+    assert_eq!(
+        compitum_pe::Machine(0x8664).family().id(),
+        "x86_64",
+        "so machine-field classification alone reports x86-64"
+    );
+
+    // The metadata is what corrects it.
+    let metadata = arm64ec
+        .hybrid
+        .as_ref()
+        .expect("the CHPE metadata must have been read");
+    assert_eq!(metadata.kind.id(), "arm64ec");
+    assert_eq!(metadata.version, 1, "version 1 denotes the ARM64EC layout");
+    assert_eq!(metadata.code_map_count, 3);
+    assert!(
+        metadata.code_map_count > 0,
+        "the code map is a direct measure of how much of a hybrid image is already native, \
+         which is why the router's throughput estimate depends on it"
+    );
+    assert_eq!(
+        arm64ec.family().id(),
+        "arm64ec",
+        "and so the family is hybrid, not x86-64"
+    );
+}
+
+/// An ARM64X file must report the fat layout, not plain ARM64.
+#[test]
+fn arm64x_is_identified_only_by_its_chpe_metadata() {
+    let arm64x = parse_corpus("chpe-arm64x.exe");
+
+    assert_eq!(
+        arm64x.coff.machine.raw(),
+        0xAA64,
+        "an ARM64X executable carries the ARM64 machine type"
+    );
+    let metadata = arm64x.hybrid.as_ref().expect("CHPE metadata present");
+    assert_eq!(metadata.kind.id(), "arm64x");
+    assert_eq!(metadata.version, 2, "version 2 denotes the ARM64X layout");
+    assert_eq!(metadata.code_map_count, 4);
+    assert_eq!(arm64x.family().id(), "arm64x");
+}
+
+/// A non-hybrid file must not acquire hybrid metadata.
+///
+/// The negative direction: a detector that reports everything as hybrid would be as useless as
+/// one that reports nothing, and would route every plain binary through the slower path.
+#[test]
+fn plain_binaries_are_not_reported_as_hybrid() {
+    for name in [
+        "real-console-4k.exe",
+        "real-gui-4k.exe",
+        "real-console-16k.exe",
+    ] {
+        let image = parse_corpus(name);
+        assert!(
+            !image.is_hybrid(),
+            "{name}: no CHPE metadata was emitted for this file, so none may be reported"
+        );
+        assert!(
+            image.hybrid.is_none(),
+            "{name}: the metadata field must be empty rather than filled with a default"
+        );
+        assert_eq!(
+            image.family().id(),
+            "arm64",
+            "{name}: without hybrid metadata the machine field is the whole answer"
+        );
+    }
+}
+
+/// The metadata offsets this crate uses must match what the generator wrote.
+///
+/// The generator and the parser are separate implementations of the same layout, so agreeing
+/// with a file the generator produced is real cross-validation rather than self-consistency.
+/// If either drifts, this fails.
+#[test]
+fn the_generator_and_the_parser_agree_on_the_chpe_layout() {
+    let arm64x = parse_corpus("chpe-arm64x.exe");
+    let metadata = arm64x.hybrid.as_ref().expect("metadata present");
+
+    // `CHPEMetadataPointer` is a virtual address, so the parser must have subtracted the
+    // image base. Reading it as an RVA would have landed at 0x140001200, far outside this
+    // 8 KiB image, and produced an error rather than a classification.
+    let optional = arm64x.optional.as_ref().expect("optional header");
+    assert_eq!(
+        optional.image_base, 0x140000000,
+        "the generator writes this base, and the pointer only resolves once it is removed"
+    );
+    assert_eq!(
+        metadata.load_config_rva, 0x1100,
+        "the generator places the load configuration here"
+    );
+    assert_eq!(metadata.code_map_rva, 0x1400, "and the code map here");
 }
