@@ -280,4 +280,6 @@ translation, and FEX as the ARM64EC x86-64 backend.
 
 ## License
 
-Dual-licensed under Apache-2.0 OR MIT, at your option.
+Dual-licensed under `Apache-2.0 OR MIT`, at your option. You may use it commercially, for free,
+without asking. See [`LICENSING.md`](LICENSING.md) for what that does and does not cover — the
+compatibility data carries its own licence, separately from the code.
