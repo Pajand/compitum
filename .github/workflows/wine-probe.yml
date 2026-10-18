@@ -76,13 +76,26 @@ jobs:
           for c in $CANDIDATES; do
             [ -x "$c" ] || continue
             echo "--- trying $c"
-            if out=$("$c" --version 2>&1); then
-              echo "    reported: $(printf '%s' "$out" | head -1)"
-              # `--version` succeeding is not enough: the wrapper reports a version even when it
-              # cannot launch a program. So a real program is executed as the test.
+            # `set +e` around every deliberately-failing command. GitHub runs `run:` blocks
+            # with `bash -e`, and the loader test executes a junk file *on purpose* to see
+            # whether Wine can launch a program at all. That command returns non-zero by
+            # design, so without this the script aborted before it could report why -- which
+            # is exactly what happened on the first run of this step: it found Wine 9.0,
+            # printed the version, and exited 1 with no explanation.
+            set +e
+            "$c" --version >/tmp/ver.txt 2>&1
+            vrc=$?
+            set -e
+
+            if [ "$vrc" -eq 0 ]; then
+              echo "    reported: $(head -1 /tmp/ver.txt)"
+              # Reporting a version is not sufficient evidence: the wrapper prints one even
+              # when it cannot launch anything. So a real program is executed as the test.
               printf 'MZ placeholder' > /tmp/notpe.exe
+              set +e
               WINEPREFIX=/tmp/wp-probe "$c" /tmp/notpe.exe >/dev/null 2>&1
               rc=$?
+              set -e
               if [ "$rc" -ne 127 ] && [ "$rc" -ne 126 ]; then
                 echo "    launched a program (exit $rc) -- accepting"
                 FOUND="$c"
@@ -90,7 +103,7 @@ jobs:
               fi
               echo "    could not launch a program (exit $rc)"
             else
-              echo "    --version failed"
+              echo "    --version failed (exit $vrc)"
             fi
           done
 
