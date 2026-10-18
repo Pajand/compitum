@@ -689,6 +689,100 @@ the x86-64 one** — so the discriminator is now CPU growth across two windows, 
 
 ---
 
+**2026-10-19 — The timeout is not self-sufficient, and this was measured**
+
+Phase 1.3 concluded that the CI runner's Wine executes ARM64EC. That conclusion rested on exit
+code 124: the fixtures loop forever, so a load runs until `timeout` fires while a refusal exits
+immediately. **The premise was never tested.** It has now been, and it is false.
+
+```
+tools/measure-timeout-signal.sh   8 rounds, alternating, wineserver killed between runs
+
+                       PHASE A (cold start)     PHASE B (warm)
+real-console-4k.exe    124  8/8                 124  8/8
+negative controls      124  8/16  <--          124  4/16  <--  neither can execute
+
+tools/measure-timeout-signal.sh with a 20 s deadline instead of 5 s
+negative controls      124  2/21  <--  a longer deadline does not fix it
+```
+
+The negative controls are a sixteen-byte file containing only the `MZ` signature and a plain
+text file. Neither can be loaded by anything. Together they hit the deadline and returned 124
+in **12 of 32** trials. Wine's own start-up can outlast the deadline, so `124` means "still
+running", and "still running" has two explanations:
+
+* the program is **executing**, or
+* the loader is **still starting, or blocked**.
+
+A longer deadline does not fix it. `timeout 20` on the same negative controls still hung
+**2 of 21** times.
+
+**The second signal, and the two traps in reading it**
+
+CPU time separates the two cases: a spinning entry point consumes it, a blocked loader does not.
+That is the reasoning `tools/loopcheck.sh` used, and its failure had been recorded here as
+"`/proc` does not work in this container". **That conclusion was too broad.** `loopcheck.sh`
+took a *host-wide* reading through `ps`, which in this container sees nothing. Reading
+`/proc/<pid>/stat` for a process we spawned works — provided the reading covers the whole
+**descendant tree**, because under Wine the direct child is a thin launcher and a child-only
+reading is zero every time, for the same wrong reason it was written off for.
+
+Two further defects, both found by measurement rather than review:
+
+* Sampling at exactly the deadline reads an already-reaped tree, so every value came back `0`.
+  The final sample must land **before** the kill.
+* Without a warm-up, the first execution in a fresh prefix spends its whole allowance
+  initialising the prefix. Warm-up is a **precondition of the method**, not a nicety.
+
+```
+tools/measure-cpu-signal.sh   4 s tail window, opens half way through the run
+
+real-console-4k.exe (infinite loop)   growth 204, 256, 253, 242, 204 ticks
+MZ-only junk file (cannot execute)    growth   1,  -1,  -2,   0,   0 ticks
+```
+
+Separation of two orders of magnitude. The threshold is **5 ticks/s** — an order below the
+signal and an order above the noise.
+
+**What changed**
+
+`crates/compitum-exec` no longer claims `Success` from a timeout alone. A new reason,
+`deadline_not_corroborated`, reports `Unknown` when the deadline fired without CPU growth, or
+when CPU time could not be measured at all. An unmeasurable host is a third state and is kept
+distinct from a measured zero, because only the first is a limitation of the instrument.
+
+`tools/probe-arm64ec.sh` requires both signals, warms up first, samples before the kill, and
+**carries a negative control** — a `MZ`-only file built at run time. If that file ever satisfies
+the criterion the run stops immediately, because a check that cannot reject an unrunnable file
+has no standing to accept one nobody has seen run.
+
+**A limitation, recorded rather than hidden**
+
+A binary that loads and then *sleeps* consumes no CPU either, so it reads exactly like one that
+was never loaded. `Unknown` is therefore the honest answer for it. This costs a result that a
+sleeping binary would have earned, and that is the correct trade: a false `Success` corrupts the
+dataset this project exists to build, while a false `Unknown` only loses one entry. A test
+asserts the limitation so that removing it requires a deliberate decision.
+
+**What this does and does not say about Phase 1.3**
+
+The strengthened probe was run on this device's Wine 6.0.3, with all three controls behaving:
+the positive control executed (451 ticks, 112 ticks/s), the negative control was **rejected**
+(exit 47, 0 ticks), and ARM64EC did not execute (exit 123, 0 ticks). That is a device result and
+it does not overturn the CI result — the runner's Wine is 9.0 and this is 6.0.3.
+
+What it does establish is that the criterion which produced the Phase 1.3 conclusion could not
+previously have rejected a file nobody can run. **That conclusion is therefore now provisional
+until the strengthened probe is run on the ARM runner.** The claim was never verified against a
+control that could fail.
+
+> **The lesson, in its sharpest form yet.** This is the eighth instance of the same defect class,
+> and the first where the wrong result had already been *used as a premise for a decision*. A
+> measurement that cannot fail cannot support a conclusion. Establishing that the instrument
+> works is not a preliminary to the real work — it is the work.
+
+---
+
 ## 7. DECISION LOG
 
 | Date | Decision | Rationale |

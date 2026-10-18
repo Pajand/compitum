@@ -36,10 +36,43 @@ name: ARM64EC probe
 #      container's own interpreter -- so every reading was +0, including for a binary already
 #      proven to execute. The instrument, not the subject, was broken.
 #
+#      **That conclusion was too broad, and correcting it is the sixth entry.** `loopcheck.sh`
+#      took a *host-wide* reading through `ps`, which in this container sees nothing. Reading
+#      `/proc/<pid>/stat` for the process we spawned ourselves works, provided the reading
+#      covers the whole **descendant tree**: under Wine the direct child is a thin launcher and
+#      a child-only reading is zero every time -- the same zero, for the same wrong reason, as
+#      the failure it was written off for.
+#   6. **The timeout alone was not sufficient evidence, and this was the defect that mattered.**
+#      `tools/measure-timeout-signal.sh` found a sixteen-byte file containing only the `MZ`
+#      signature -- and a plain text file -- hitting the deadline and returning 124 in **12 of 32
+#      trials**. Wine's own start-up can outlast the deadline, so "still running" has
+#      two explanations and only one is about the binary. A deadline of 20 s did not separate
+#      them either (2 of 21 negative runs still hit it).
+#
+#      The fix is a second, independent signal: CPU time consumed by the process tree in a
+#      window that opens **after start-up has settled**. Measured separation over a 4 s tail
+#      windows: 256/253/242/204 ticks for the looping fixture (and once 0, recorded rather than
+#      smoothed away), and never above 1 tick for a file Wine cannot run.
+#   7. The first attempt at that second signal sampled at exactly the deadline, so the last
+#      reading landed after the process was reaped and every value came back 0 -- and without a
+#      warm-up the first execution in a fresh prefix spends its entire allowance initialising
+#      the prefix, which is indistinguishable from a blocked loader. Warm-up is a precondition
+#      of the method, not a nicety, and the final sample must land before the kill.
+#   8. The threshold was scaled by `getconf CLK_TCK` on top of a value that was already in clock
+#      ticks, so a genuine 112 ticks/s was reported as 12725 -- 100x too large, in the direction
+#      that would make a blocked loader look busy.
+#
 # Every one of those was the measurement reporting something other than what happened. That is
 # the same failure mode as the PE offset bug, the CHPE misidentification, and the three scanner
 # rules that could never fire -- so it is worth naming: establish that the instrument works
 # before trusting what it measures.
+#
+# # The probe now proves it can refuse
+#
+# Because entry 6 showed the old criterion accepted a file nobody can run, the probe carries a
+# **negative control**: a 16-byte `MZ`-only file, built at run time. If that file ever satisfies
+# the criterion the run stops immediately, because a check that cannot reject an unrunnable file
+# has no standing to accept one nobody has seen run.
 
 on:
   workflow_dispatch:
@@ -48,6 +81,10 @@ on:
       - 'crates/compitum-pe/tests/corpus/**'
       - 'tools/probe-arm64ec.sh'
       - 'tools/loopcheck.sh'
+      # The measurements that establish whether the probe's criterion can be trusted. They are
+      # triggers in their own right because a change to either changes what the probe means.
+      - 'tools/measure-timeout-signal.sh'
+      - 'tools/measure-cpu-signal.sh'
       - '.github/workflows/wine-probe.yml'
 
 jobs:

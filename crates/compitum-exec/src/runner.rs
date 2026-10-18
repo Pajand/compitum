@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::{classify, RawSignals, Verdict};
+use crate::{classify, CpuEvidence, CpuSampler, RawSignals, Verdict};
 
 /// Polling interval while waiting for a child process.
 ///
@@ -103,6 +103,14 @@ pub struct Observation {
     pub output_truncated: bool,
     /// `true` when the process had to be terminated at the deadline.
     pub terminated: bool,
+    /// The CPU-time evidence gathered, or `None` when it could not be measured.
+    ///
+    /// Kept separately from [`Observation::signals`] because it is the corroboration for a
+    /// timeout: a reader must be able to see that the deadline fired *and* what the CPU time
+    /// said, rather than only the verdict those two produced.
+    pub cpu: Option<CpuEvidence>,
+    /// How many CPU samples were taken, so a report can show whether sampling was even active.
+    pub cpu_samples: u64,
 }
 
 impl Observation {
@@ -124,6 +132,27 @@ impl Observation {
             .with("terminated_at_deadline", self.terminated)
             .with("exit_code", self.signals.exit_code.map(i64::from))
             .with("signal", self.signals.signal.map(i64::from))
+            // The evidence behind a timeout verdict, reported alongside it so a consumer can
+            // disagree with the interpretation instead of having to trust it. `null` means the
+            // CPU time could not be measured, which is a different statement from a measured
+            // zero and must not be collapsed with it.
+            .with(
+                "cpu_peak_ticks",
+                self.cpu.map(|e| e.peak_ticks).map(|v| v as i64),
+            )
+            .with(
+                "cpu_tail_growth_ticks",
+                self.cpu.map(|e| e.tail_growth_ticks()).map(|v| v as i64),
+            )
+            .with(
+                "cpu_ticks_per_second",
+                self.cpu.map(|e| e.ticks_per_second()).map(|v| v as i64),
+            )
+            .with(
+                "cpu_tail_window_millis",
+                self.cpu.map(|e| e.tail_window_millis).map(|v| v as i64),
+            )
+            .with("cpu_samples", self.cpu_samples as i64)
             .with("output_truncated", self.output_truncated)
             .with("output", self.output.as_str())
             .into()
@@ -227,13 +256,47 @@ pub fn run(request: &RunRequest) -> Result<Observation, RunnerError> {
         .spawn()
         .map_err(|error| spawn_error(request, &error))?;
 
+    // CPU sampling covers the whole descendant tree, not just this child: under Wine the child
+    // is a thin launcher and every reading of it alone is zero. See `crate::cpu`.
+    let mut sampler = CpuSampler::new(child.id());
+    let _ = sampler.sample();
+
+    // The tail window opens half way through the allowance.
+    //
+    // It must not open at process start: Wine's own initialisation is CPU-heavy and unrelated
+    // to the binary, and a first attempt at this measurement that sampled from 1.5 s produced
+    // 26 ticks for a binary that was demonstrably looping -- overlapping the negative
+    // controls, which reached 1. Starting at the half-way point makes the window scale with
+    // the deadline the operator chose, so a longer allowance gives a longer and later window.
+    let tail_opens_at = request.deadline / 2;
+    let mut tail_opened_at: Option<Instant> = None;
+
     let deadline = started + request.deadline;
     let mut terminated = false;
+    let mut polls: u64 = 0;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                // Sampling every poll would read all of `/proc` fifty times a second for no
+                // added information. Every fifth poll is 100 ms at the default interval, which
+                // resolves a rate over a multi-second window with room to spare.
+                polls += 1;
+                if polls % 5 == 0 {
+                    let _ = sampler.sample();
+                }
+
+                let elapsed = started.elapsed();
+                if tail_opened_at.is_none() && elapsed >= tail_opens_at {
+                    sampler.begin_tail_window();
+                    tail_opened_at = Some(Instant::now());
+                }
+
                 if Instant::now() >= deadline {
+                    // One last reading before terminating. The process is at its busiest here,
+                    // and it is the reading that best shows a loop still running.
+                    let _ = sampler.sample();
+
                     // Terminate, then reap. `kill` can fail if the process exited between the
                     // poll and the call, which is not an error worth surfacing.
                     let _ = child.kill();
@@ -257,6 +320,13 @@ pub fn run(request: &RunRequest) -> Result<Observation, RunnerError> {
     let elapsed_millis = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     let (output, output_truncated) = read_output(&output_path);
 
+    // The measured length of the tail window, taken from the clock rather than from the
+    // nominal deadline, so a process that exited early reports the window it actually had.
+    let tail_window_millis = tail_opened_at
+        .map(|opened| opened.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0);
+    let cpu = sampler.evidence(tail_window_millis);
+
     // `ExitStatusExt::signal` is a safe accessor on Unix; no unsafe is required.
     #[cfg(unix)]
     let signal = {
@@ -278,6 +348,10 @@ pub fn run(request: &RunRequest) -> Result<Observation, RunnerError> {
         // but a request may legitimately go through a shell wrapper, so it is still honoured.
         command_not_found: status.code() == Some(127),
         command_not_executable: status.code() == Some(126),
+        // `None` when `/proc` was unreadable. Passing it through rather than substituting a
+        // zero keeps "not measured" distinct from "measured no CPU", which is the difference
+        // between a host limitation and a finding about the binary.
+        cpu,
     };
 
     let verdict = classify(signals, request.deadline.as_millis() as u64);
@@ -293,6 +367,8 @@ pub fn run(request: &RunRequest) -> Result<Observation, RunnerError> {
         output,
         output_truncated,
         terminated,
+        cpu,
+        cpu_samples: sampler.sample_count(),
     })
 }
 
@@ -400,23 +476,64 @@ mod tests {
     }
 
     #[test]
-    fn a_process_that_outlives_the_deadline_is_terminated_and_counts_as_executed() {
-        let request = RunRequest::new(shell(), 400).arg("-c").arg("sleep 30");
+    fn a_cpu_consuming_process_that_outlives_the_deadline_is_a_success() {
+        // A busy loop is the shape the corpus fixtures have, and it is what the ARM64EC probe
+        // relies on: the entry point spins forever, so a loaded program keeps consuming CPU
+        // until the deadline. The deadline firing *and* CPU growth together are the two halves
+        // of the evidence, and neither alone is sufficient.
+        let request = RunRequest::new(shell(), 3000)
+            .arg("-c")
+            .arg("while :; do :; done");
         let observation = run(&request).expect("must run");
         assert!(
             observation.terminated,
             "the runner must terminate the process itself"
         );
-        assert_eq!(observation.verdict.outcome, Outcome::Success);
         assert_eq!(
             observation.verdict.reason,
-            crate::RunReason::RanUntilDeadline
+            crate::RunReason::RanUntilDeadline,
+            "reason was {:?} with CPU evidence {:?}",
+            observation.verdict.reason,
+            observation.cpu
         );
-        // It must not have waited for the full sleep.
+        assert_eq!(observation.verdict.outcome, Outcome::Success);
+        assert!(observation.verdict.recordable);
+        // It must not have waited for anything longer than the deadline.
         assert!(
             observation.elapsed_millis < 10_000,
             "deadline not enforced: ran {} ms",
             observation.elapsed_millis
+        );
+    }
+
+    #[test]
+    fn a_sleeping_process_that_outlives_the_deadline_is_unknown_not_a_success() {
+        // A REAL LIMITATION, recorded deliberately rather than hidden.
+        //
+        // `sleep` consumes no CPU, so CPU time cannot distinguish "executing and idle" from
+        // "blocked before starting". Both produce the same reading, and the same reading also
+        // comes from a file Wine cannot execute at all -- which is precisely the case that must
+        // not be recorded as a success.
+        //
+        // `Unknown` is therefore the honest answer. It costs a result that a sleeping binary
+        // would have earned, and that is the correct trade: a false `Success` corrupts the
+        // dataset this project exists to build, while a false `Unknown` only loses one entry.
+        //
+        // This test asserts the limitation so that removing it requires a deliberate decision.
+        let request = RunRequest::new(shell(), 3000).arg("-c").arg("sleep 30");
+        let observation = run(&request).expect("must run");
+        assert!(
+            observation.terminated,
+            "the deadline must still be enforced"
+        );
+        assert_eq!(
+            observation.verdict.reason,
+            crate::RunReason::DeadlineNotCorroborated
+        );
+        assert_eq!(observation.verdict.outcome, Outcome::Unknown);
+        assert!(
+            !observation.verdict.recordable,
+            "an uncorroborated timeout must not enter the Oracle"
         );
     }
 

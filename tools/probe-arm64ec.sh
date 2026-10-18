@@ -6,33 +6,60 @@
 # Exit 0 means ARM64EC executed; exit 1 means it did not, and the caller should read that as
 # "a build is required" rather than as a defect in the workflow.
 #
-# # Why the measurement is an exit code, when an earlier check in this project was told not to
+# # Why this measurement is not just an exit code any more
 #
-# `tools/loopcheck.sh` measures CPU growth across two windows, because a hanging process also
-# times out and an exit code therefore cannot distinguish *running* from *blocked*. That
-# reasoning is sound, and it was learned the hard way.
+# An earlier version of this script decided the question from the exit code alone: every
+# fixture's entry point is an infinite loop, so a binary that LOADS runs until `timeout`
+# fires (exit 124), while one that is REFUSED exits immediately.
 #
-# It cannot be used here. CPU growth is read from `/proc/<pid>/stat`, and under the container
-# this runs in, a Wine-spawned process is visible only as the container's own interpreter --
-# so every reading came back `+0`, including for a binary already proven to execute. The
-# instrument, not the subject, was broken.
+# That reasoning is sound as far as it goes, and it is not sufficient. It was measured:
 #
-# The corpus gives a better signal. Every fixture's entry point is an infinite loop, so:
+#   tools/measure-timeout-signal.sh
 #
-#   * a binary that LOADS runs forever  -> the timeout fires -> exit 124
-#   * a binary that is REFUSED exits immediately -> some other code
+# A sixteen-byte file containing only the `MZ` signature -- which nothing can execute --
+# also ran until the deadline and returned 124, in **12 of 32 trials** (two negative controls,
+# 16 runs each phase). Wine's own start-up
+# can outlast the deadline, so "still running" has two explanations and only one of them is
+# about the binary:
 #
-# 124 versus "not 124" is a clean separation for these fixtures, and it needs no /proc access.
-# The control below proves the method on a binary whose behaviour is already known, so the
-# method is validated before it is trusted.
+#   * the program is EXECUTING  -- its spinning entry point keeps consuming CPU, or
+#   * the loader is STILL STARTING or BLOCKED -- it consumes none.
+#
+# So the timeout is necessary but not sufficient, and this script now requires a second,
+# independent signal: CPU time consumed by the process **tree**, measured in a window that
+# opens after start-up has settled.
+#
+# # Why the whole tree, and why a late window
+#
+# Reading only the direct child measures nothing: under Wine the child is a thin launcher and
+# the real work happens in a loader whose parent chain runs through `wineserver`. A
+# child-only reading returns 0 every time, including for a binary already proven to execute.
+#
+# And an early window measures Wine rather than the binary. The first attempt sampled from
+# 1.5 s and produced 26 ticks for a fixture that was demonstrably looping -- overlapping the
+# negative controls, which reached 1. Opening the window half way through the run is what
+# makes the two separable.
+#
+# Measured separation, from tools/measure-cpu-signal.sh: the fixture was sampled at 1 s and
+# again at 4 s of an 8 s run, so the window is 3 s and it starts after start-up.
+#
+#   the real ARM64 fixture (infinite loop) : 256, 253, 242, 204, and once 0 ticks
+#   a file containing only `MZ`            : never above 1 tick
+#
+# The single zero in the first row is recorded rather than smoothed away: one sampling window
+# can miss. `crates/compitum-exec` keeps a *peak* across many samples for exactly this reason,
+# which is more robust than the two-point difference this script uses.
+#
+# The threshold below is 5 ticks per second: an order of magnitude under the signal and an
+# order of magnitude over the noise.
 #
 # # Every Wine invocation is guarded
 #
 # An earlier version hung for 43 minutes on work that should take five. Wine starts a
-# `wineserver` daemon that detaches and inherits the step's file descriptors, keeping the step
-# alive after the program it was started for has gone. So each call is bounded by `timeout`,
-# gets `</dev/null` so it cannot wait on input, redirects to a file so it cannot hold the
-# caller's stdout, and is followed by `wineserver -k`.
+# `wineserver` daemon that detaches and inherits the step's file descriptors, keeping the
+# step alive after the program it was started for has gone. So each call is bounded by
+# `timeout`, gets `</dev/null` so it cannot wait on input, redirects to a file so it cannot
+# hold the caller's stdout, and is followed by `wineserver -k`.
 
 set -u
 
@@ -41,6 +68,10 @@ SAMPLE="$CORPUS/real-console-4k.exe"
 ARM64EC="$CORPUS/chpe-arm64ec.exe"
 RUN_SECONDS=8
 
+# Ticks per second of sustained tree-wide CPU growth required to conclude that a binary is
+# executing rather than still starting. See the comment above for how it was chosen.
+MIN_TICKS_PER_SECOND=5
+
 for required in "$SAMPLE" "$ARM64EC"; do
     if [ ! -f "$required" ]; then
         echo "::error::missing fixture: $required" >&2
@@ -48,22 +79,128 @@ for required in "$SAMPLE" "$ARM64EC"; do
     fi
 done
 
-# Runs a fixture and reports whether it was still running when the timeout fired.
-# Prints 0 when the program executed, 1 when it did not, and the raw exit code on stderr.
+# Brings the current WINEPREFIX to a state where measurement means something.
+#
+# Without this the first execution of any binary in a fresh prefix spends its whole allowance
+# initialising the prefix, which is indistinguishable from a loader that is blocked. The
+# throwaway run is deliberately the CONTROL, so warming up also fails loudly if the
+# environment cannot run a known-good binary at all.
+warm_up() {
+    warm_subject="$1"
+    WINEDLLOVERRIDES="mscoree,mshtml=" timeout 60 "$WINE_BIN" wineboot -i \
+        </dev/null >/dev/null 2>&1 || true
+    timeout "$((RUN_SECONDS + 3))" "$WINE_BIN" "$warm_subject" </dev/null >/dev/null 2>&1 || true
+    timeout 20 "$WINE_BIN" wineserver -k </dev/null >/dev/null 2>&1 || true
+    sleep 1
+}
+
+# Sums the CPU ticks of a pid and every descendant.
+#
+# The process name in /proc/<pid>/stat is parenthesised and MAY CONTAIN SPACES, so fields are
+# counted from after the final ')' rather than by splitting the whole line. Splitting naively
+# reads the wrong field for any process whose name contains a space, and the resulting error
+# is silent -- it yields a plausible number.
+tree_ticks() {
+    root="$1"
+    for entry in /proc/[0-9]*; do
+        [ -r "$entry/stat" ] || continue
+        rest=$(sed 's/.*) //' "$entry/stat" 2>/dev/null) || continue
+        [ -n "$rest" ] || continue
+        printf '%s %s\n' "${entry#/proc/}" "$(printf '%s' "$rest" | awk '{print $2, $12 + $13}')"
+    done | awk -v root="$root" '
+        { pid[NR] = $1; parent[NR] = $2; ticks[NR] = $3; count = NR }
+        END {
+            inside[root] = 1
+            # Fixed-point closure rather than recursion: the table is unordered, so a child
+            # can appear before its parent and a single pass would miss it.
+            for (pass = 0; pass < 16; pass++)
+                for (i = 1; i <= count; i++)
+                    if (inside[parent[i]]) inside[pid[i]] = 1
+            total = 0
+            for (i = 1; i <= count; i++)
+                if (inside[pid[i]]) total += ticks[i]
+            print total
+        }
+    '
+}
+
+# Runs a fixture and reports whether it EXECUTED.
+#
+# Returns 0 only when the deadline fired AND the process tree consumed CPU above the
+# threshold after start-up settled. Prints the evidence either way, so a disagreement with
+# the verdict can be argued with rather than merely disbelieved.
+#
+# # Warm-up is a precondition, not a nicety
+#
+# On a FRESH Wine prefix, the very first execution spends its entire allowance initialising
+# the prefix: it returns 124 with a tree total of about 3 ticks, because the fixture never
+# reaches its loop. The strengthened probe then refuses to call that execution -- correctly,
+# since a file that cannot load looks identical -- but the refusal says nothing about the
+# binary.
+#
+# `tools/measure-cpu-signal.sh` already established this: every measurement there is preceded
+# by `wineboot` AND a throwaway run. So `warm_up` does the same before anything is judged.
 executes() {
     binary="$1"
+    label="$2"
+
+    # Half the run is the tail window: start-up is over by then, and the remaining time is
+    # long enough to sustain a measurable rate.
+    tail_at=$((RUN_SECONDS / 2))
+
+    # The last sample must land BEFORE the kill, or it reads an already-reaped tree and
+    # reports zero. An earlier version sampled at exactly the deadline and every reading came
+    # back 0 -- a zero indistinguishable from a subject that did nothing, which is precisely
+    # the failure this probe exists to catch. The margin costs three seconds.
     set +e
-    timeout "$RUN_SECONDS" "$WINE_BIN" "$binary" </dev/null >/tmp/run.log 2>&1
+    timeout $((RUN_SECONDS + 3)) "$WINE_BIN" "$binary" </dev/null >/tmp/run.log 2>&1 &
+    run_pid=$!
+    set -e
+
+    sleep "$tail_at"
+    baseline=$(tree_ticks "$run_pid")
+
+    sleep $((RUN_SECONDS - tail_at))
+    peak=$(tree_ticks "$run_pid")
+
+    set +e
+    wait "$run_pid" 2>/dev/null
     rc=$?
     set -e
+
     # Stop the daemon, which would otherwise outlive its trial.
     timeout 20 "$WINE_BIN" wineserver -k </dev/null >/dev/null 2>&1 || true
     sleep 1
-    echo "      raw exit code: $rc" >&2
-    if [ "$rc" -eq 124 ]; then
-        return 0    # still running when the timeout fired, therefore executing
+
+    window=$((RUN_SECONDS - tail_at))
+    growth=$((peak - baseline))
+    [ "$growth" -lt 0 ] && growth=0
+
+    # `growth` is already in clock ticks and `window` in seconds, so the threshold is compared
+    # against `growth` directly. An earlier version scaled by `getconf CLK_TCK` as well, which
+    # counted the tick unit twice and reported 12725 ticks/s for a reading that was 127 -- a
+    # number 100x too large, in a direction that would make a blocked loader look busy.
+    #
+    # Multiplication rather than division so a short window cannot truncate the rate to zero.
+    required=$((MIN_TICKS_PER_SECOND * window))
+    rate=$((growth / window))
+
+    echo "    $label raw exit code : $rc   (124 = the deadline fired)"
+    echo "    $label tree CPU      : baseline=$baseline peak=$peak growth=$growth ticks"
+    echo "    $label sustained     : $rate ticks/s (threshold $MIN_TICKS_PER_SECOND, needs $required ticks in ${window}s)"
+
+    if [ "$rc" -ne 124 ]; then
+        echo "    ==> EXITED on its own, so it did not load"
+        return 1
     fi
-    return 1        # exited on its own, so it did not load
+    if [ "$growth" -lt "$required" ]; then
+        echo "    ==> TIMED OUT WITHOUT CONSUMING CPU: still starting or blocked, not executing."
+        echo "        A file that cannot be loaded at all produces the same reading, so this"
+        echo "        is NOT evidence that the binary executed."
+        return 1
+    fi
+    echo "    ==> EXECUTING: timed out and sustained $rate ticks/s"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -75,7 +212,8 @@ executes() {
 # install it says "it looks like wine32 is missing" and exits.
 #
 # So each candidate is judged by whether it executes the control, not by whether it reports a
-# version.
+# version. The control runs FIRST, which is why the result below is trustworthy: a probe that
+# cannot even confirm a known-good binary has no standing to judge a hard one.
 # ---------------------------------------------------------------------------
 WINE_BIN=""
 for candidate in /usr/bin/wine64 /usr/bin/wine /usr/lib/wine/wine64; do
@@ -100,8 +238,11 @@ for candidate in /usr/bin/wine64 /usr/bin/wine /usr/lib/wine/wine64; do
         </dev/null >/tmp/boot.log 2>&1 || true
     grep -iE "wine32|error|cannot|missing" /tmp/boot.log | head -3 | sed 's/^/    boot: /'
 
+    echo "    warming up this prefix (wineboot + one throwaway run)"
+    warm_up "$SAMPLE"
+
     echo "    control (plain ARM64, known to execute):"
-    if executes "$SAMPLE"; then
+    if executes "$SAMPLE" "control"; then
         echo "    ==> WORKS"
         echo
         break
@@ -122,36 +263,73 @@ echo "using: $WINE_BIN"
 echo
 
 # ---------------------------------------------------------------------------
-# Step 2: the control, stated explicitly so the log shows it passed.
+# Step 2: the controls, on a fresh prefix.
+#
+# TWO controls, not one, and the second is the important one.
+#
+#   POSITIVE  a plain ARM64 binary known to execute. If this fails, the environment is
+#             broken and no verdict about ARM64EC can be drawn from the run.
+#
+#   NEGATIVE  a file that is not a PE image at all, so Wine CANNOT execute it. This one
+#             exists because the criterion being tested is new: the timeout alone was used
+#             before and was measured to be unreliable (`tools/measure-timeout-signal.sh`
+#             found a `MZ`-only file hitting the deadline in 12 of 32 trials).
+#
+#             If the negative control PASSES the criterion, the criterion is broken and the
+#             subject's result means nothing. A check that cannot reject a file nobody can
+#             run has no standing to accept one that nobody has seen run.
+#
+# The negative control is built here rather than committed, so nothing in the repository
+# depends on a binary fixture, and so it cannot accidentally become runnable.
 # ---------------------------------------------------------------------------
 export WINEPREFIX=/tmp/wp-final
 rm -rf "$WINEPREFIX"; mkdir -p "$WINEPREFIX"
-WINEDLLOVERRIDES="mscoree,mshtml=" timeout 60 "$WINE_BIN" wineboot -i \
-    </dev/null >/dev/null 2>&1 || true
+warm_up "$SAMPLE"
 
 echo "control   (plain ARM64)   :"
-if ! executes "$SAMPLE"; then
+if ! executes "$SAMPLE" "control"; then
     echo "VERDICT: the control did not execute, so ARM64EC cannot be judged from this run."
     exit 1
 fi
 echo "          control PASSED"
+
+# A 16-byte file carrying only the MZ signature. Wine reports it as unloadable and exits 47,
+# but -- as measured -- it sometimes runs until the deadline instead. Either way it must
+# never satisfy the criterion.
+NEGATIVE=/tmp/wp-negative.exe
+printf 'MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00' > "$NEGATIVE"
+
+echo
+echo "negative  (MZ only, not a PE image):"
+if executes "$NEGATIVE" "negative"; then
+    echo
+    echo "VERDICT: the criterion is BROKEN -- it accepted a file Wine cannot execute."
+    echo "  Nothing below would have been meaningful, so the run stops here."
+    echo "  Expected: an exit other than 124, or 124 with no sustained CPU growth."
+    exit 1
+fi
+echo "          negative control REJECTED, as it must be"
 
 # ---------------------------------------------------------------------------
 # Step 3: the actual question.
 # ---------------------------------------------------------------------------
 echo
 echo "subject   (ARM64EC)       :"
-if executes "$ARM64EC"; then
+if executes "$ARM64EC" "subject"; then
     echo
     echo "VERDICT: ARM64EC EXECUTES on this machine's Wine."
     echo "  $("$WINE_BIN" --version 2>&1 | head -1)"
+    echo "  Evidence: the deadline fired AND the process tree sustained CPU growth above"
+    echo "  the threshold, so this is execution rather than a slow start."
+    echo "  Both controls held, so the criterion that produced this answer can reject a"
+    echo "  file that cannot run -- which is what makes the answer about the subject."
     exit 0
 fi
 
 echo
 echo "VERDICT: ARM64EC does NOT execute on this machine's Wine."
 echo "  $("$WINE_BIN" --version 2>&1 | head -1)"
-echo "  The control passed, so the environment is sound and this is a real limitation."
-echo "  Building Wine from source is therefore justified; see"
+echo "  Both controls held, so the environment is sound and the criterion is discriminating;"
+echo "  this is a real limitation. Building Wine from source is therefore justified; see"
 echo "  docs/BUILDING-ARM64EC-WINE.md."
 exit 1

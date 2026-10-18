@@ -21,7 +21,8 @@
 //!
 //! | Signal | Meaning | Recorded as |
 //! |---|---|---|
-//! | The deadline fired and the process was still alive | it **loaded and ran** | `Success` |
+//! | The deadline fired **and CPU time grew after settling** | it **loaded and ran** | `Success` |
+//! | The deadline fired with no CPU growth | it was still *starting*, or blocked | `Unknown` |
 //! | Clean exit (0) | it **ran and did its job** | `Success` |
 //! | Non-zero exit after starting | it ran, then reported an error | `Partial` |
 //! | Exit 126 or 127, or the backend was missing | **the backend never started it** | **not recorded** |
@@ -32,17 +33,39 @@
 //! environment to the binary, and a dataset polluted that way is worse than an empty one,
 //! because its errors are indistinguishable from its findings.
 //!
+//! # The timeout is not self-sufficient, and this was measured
+//!
+//! The first two rows are split because the first version of this crate had only row one, and
+//! it was **wrong**. It read a timeout as proof of execution, reasoning that the fixtures loop
+//! forever so a refused file exits immediately.
+//!
+//! `tools/measure-timeout-signal.sh` then showed that a sixteen-byte file containing only the
+//! `MZ` signature — which nothing can execute — also ran until the deadline and returned 124,
+//! in 12 of 32 trials. Wine's own start-up can outlast the deadline, so "still running" can
+//! mean "still starting".
+//!
+//! A timeout is therefore **necessary but not sufficient**. [`cpu`] supplies the missing
+//! signal, and [`classify`] refuses to claim `Success` from a timeout alone. See that module
+//! for why the reading must cover the whole process tree, and why an early window measures
+//! Wine rather than the binary.
+//!
 //! # Purity
 //!
 //! [`classify`] is a pure function over the raw signals, so the interpretation is fully testable
-//! without running anything. Only [`runner`] performs I/O.
+//! without running anything. Only [`runner`] performs I/O — including the CPU sampling, which
+//! is passed in as data rather than read at decision time. That keeps a stored Oracle record
+//! reproducible.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod cpu;
 pub mod runner;
 
+pub use cpu::{CpuEvidence, CpuSampler};
 pub use runner::{run, Observation, RunRequest, RunnerError};
+
+use cpu::MIN_TICKS_PER_SECOND;
 
 use compitum_oracle::{Outcome, Provenance};
 
@@ -84,6 +107,11 @@ pub enum RunReason {
     BackendNotExecutable,
     /// The launcher itself failed.
     LauncherFailed,
+    /// The deadline fired, but nothing showed that the process had actually started working.
+    ///
+    /// Distinct from [`RunReason::RanUntilDeadline`] precisely because "still running" has two
+    /// explanations and only one of them is about the binary. See the module documentation.
+    DeadlineNotCorroborated,
 }
 
 impl RunReason {
@@ -98,6 +126,7 @@ impl RunReason {
             RunReason::BackendMissing => "backend_missing",
             RunReason::BackendNotExecutable => "backend_not_executable",
             RunReason::LauncherFailed => "launcher_failed",
+            RunReason::DeadlineNotCorroborated => "deadline_not_corroborated",
         }
     }
 
@@ -130,6 +159,13 @@ pub struct RawSignals {
     pub command_not_found: bool,
     /// `true` when the launcher reported the command was not executable (shell status 126).
     pub command_not_executable: bool,
+    /// CPU-time evidence gathered while the process ran, or `None` when it could not be
+    /// measured.
+    ///
+    /// Required to corroborate a timeout. `None` means *not measured*, which is deliberately
+    /// distinct from a measurement of zero: only the first may be caused by a platform without
+    /// `/proc`, and reporting the second for it would state a finding that was never made.
+    pub cpu: Option<CpuEvidence>,
 }
 
 /// Interprets raw process signals into a [`Verdict`].
@@ -172,33 +208,60 @@ pub fn classify(signals: RawSignals, deadline_millis: u64) -> Verdict {
 
     // ---- The deadline fired -------------------------------------------------
     //
-    // Reaching the deadline means the process was still alive, which for a program that does
-    // not terminate on its own is proof that it loaded and executed. This is the signal the
-    // probe in `tools/probe-arm64ec.sh` relies on, and it is stated here rather than assumed.
+    // A timeout is NOT by itself evidence of execution. It was measured: a file Wine cannot
+    // execute also ran until the deadline in 12 of 32 trials, because Wine's own start-up can
+    // outlast the deadline.
+    //
+    // So "still running" has two explanations, and only one is about the binary:
+    //
+    //   * the process is executing   -- a spinning entry point keeps consuming CPU, or
+    //   * the process is starting or blocked -- it consumes none.
+    //
+    // CPU time consumed **after start-up settled** separates them. See `crate::cpu` for the
+    // measurement and for why the window must open late.
     if signals.timed_out {
-        // A timeout on a process that was killed rather than still running is different, but
-        // the runner cannot distinguish those after the fact; the exit code carries the detail.
-        if signals.signal.is_some() || matches!(signals.exit_code, Some(137) | Some(143)) {
-            return Verdict {
+        return match signals.cpu {
+            Some(evidence) if evidence.shows_execution() => Verdict {
                 outcome: Outcome::Success,
                 provenance: Provenance::ObservedExecution,
                 reason: RunReason::RanUntilDeadline,
                 explanation: format!(
-                    "the process was still running when the {deadline_millis} ms deadline \
-                     fired and had to be terminated, which means it loaded and executed"
+                    "the process was still running when the {deadline_millis} ms deadline fired, \
+                     and consumed {} CPU ticks during the {} ms window after start-up settled \
+                     ({} ticks per second): it loaded and executed",
+                    evidence.tail_growth_ticks(),
+                    evidence.tail_window_millis,
+                    evidence.ticks_per_second()
                 ),
                 recordable: true,
-            };
-        }
-        return Verdict {
-            outcome: Outcome::Success,
-            provenance: Provenance::ObservedExecution,
-            reason: RunReason::RanUntilDeadline,
-            explanation: format!(
-                "the process was still running when the {deadline_millis} ms deadline fired, \
-                 which means it loaded and executed"
-            ),
-            recordable: true,
+            },
+            Some(evidence) => Verdict {
+                outcome: Outcome::Unknown,
+                provenance: Provenance::ObservedExecution,
+                reason: RunReason::DeadlineNotCorroborated,
+                explanation: format!(
+                    "the {deadline_millis} ms deadline fired, but the process consumed only {} \
+                     CPU ticks per second after start-up settled ({} ticks in {} ms), below the \
+                     {MIN_TICKS_PER_SECOND}/s threshold. A process that is still starting, or \
+                     blocked, looks exactly like this -- so nothing can be concluded about the \
+                     binary, and a longer deadline may resolve it",
+                    evidence.ticks_per_second(),
+                    evidence.tail_growth_ticks(),
+                    evidence.tail_window_millis
+                ),
+                recordable: false,
+            },
+            None => Verdict {
+                outcome: Outcome::Unknown,
+                provenance: Provenance::ObservedExecution,
+                reason: RunReason::DeadlineNotCorroborated,
+                explanation: format!(
+                    "the {deadline_millis} ms deadline fired, but CPU time could not be \
+                     measured here, so 'still running' cannot be distinguished from 'still \
+                     starting'. This is a limitation of the host, not a result about the binary"
+                ),
+                recordable: false,
+            },
         };
     }
 
@@ -259,17 +322,41 @@ mod tests {
             timed_out: false,
             command_not_found: false,
             command_not_executable: false,
+            cpu: None,
         }
     }
 
+    /// CPU evidence showing sustained consumption, as a running loop produces.
+    ///
+    /// 200 ticks in a 3 s window is about 67 ticks/s, which is the rate
+    /// `tools/measure-cpu-signal.sh` measured for the real fixture (204-256 ticks over the
+    /// same 3 s window) and far above the negative controls, which never exceeded 1.
+    fn executing() -> Option<CpuEvidence> {
+        Some(CpuEvidence {
+            peak_ticks: 200,
+            tail_baseline_ticks: 0,
+            tail_window_millis: 3000,
+        })
+    }
+
+    /// CPU evidence showing no consumption, as a blocked or still-starting loader produces.
+    fn not_executing() -> Option<CpuEvidence> {
+        Some(CpuEvidence {
+            peak_ticks: 1,
+            tail_baseline_ticks: 0,
+            tail_window_millis: 3000,
+        })
+    }
+
     #[test]
-    fn a_timeout_means_it_executed() {
-        // The distinction this whole crate is careful about: a program still running at the
-        // deadline has demonstrably loaded and executed, which is what an infinite-loop fixture
-        // is for.
+    fn a_timeout_with_cpu_growth_means_it_executed() {
+        // A program still running at the deadline AND consuming CPU has demonstrably loaded
+        // and executed. Both halves are required: the timeout alone was measured to be
+        // unreliable, so the CPU evidence is what upgrades the observation to a result.
         let verdict = classify(
             RawSignals {
                 timed_out: true,
+                cpu: executing(),
                 ..signals(None, None)
             },
             8000,
@@ -281,37 +368,108 @@ mod tests {
     }
 
     #[test]
-    fn a_timeout_that_killed_the_process_still_counts_as_executed() {
+    fn a_timeout_without_cpu_growth_is_not_a_result() {
+        // THE REGRESSION GUARD for the defect this crate shipped with.
+        //
+        // A file Wine cannot execute was measured to hit the deadline in 12 of 32 trials,
+        // because Wine's own start-up can outlast the deadline. So a timeout with no evidence
+        // that the process ever started working must NOT be recorded as a success -- that is
+        // how a still-starting loader becomes a dataset entry claiming the binary runs.
+        let verdict = classify(
+            RawSignals {
+                timed_out: true,
+                cpu: not_executing(),
+                ..signals(None, None)
+            },
+            8000,
+        );
+        assert_eq!(verdict.outcome, Outcome::Unknown);
+        assert_eq!(verdict.reason, RunReason::DeadlineNotCorroborated);
+        assert!(
+            !verdict.recordable,
+            "an uncorroborated timeout says nothing about the binary and must not enter the Oracle"
+        );
+        assert!(!verdict.reason.describes_the_binary());
+    }
+
+    #[test]
+    fn an_unmeasurable_timeout_is_unknown_and_not_a_silent_success() {
+        // No `/proc`, so CPU time cannot be read. `None` means "not measured", which is
+        // deliberately not the same as "measured zero": reporting either as Success would be
+        // asserting something the run never established.
+        let verdict = classify(
+            RawSignals {
+                timed_out: true,
+                cpu: None,
+                ..signals(None, None)
+            },
+            8000,
+        );
+        assert_eq!(verdict.outcome, Outcome::Unknown);
+        assert_eq!(verdict.reason, RunReason::DeadlineNotCorroborated);
+        assert!(!verdict.recordable);
+        assert!(
+            verdict.explanation.contains("limitation of the host"),
+            "the explanation must distinguish an unmeasurable host from a measured zero: {}",
+            verdict.explanation
+        );
+    }
+
+    #[test]
+    fn a_timeout_that_killed_the_process_is_judged_on_cpu_like_any_other() {
         // `timeout` sends TERM then KILL, so the deadline path commonly ends with a signal or
-        // with 143/137. That is still proof of execution, not a failure.
+        // with 143/137. That detail must not bypass the corroboration: the exit status says how
+        // the process ended, not whether it had started working.
         for (code, sig) in [(None, Some(15)), (Some(143), None), (Some(137), None)] {
-            let verdict = classify(
+            let corroborated = classify(
                 RawSignals {
                     timed_out: true,
+                    cpu: executing(),
                     ..signals(code, sig)
                 },
                 5000,
             );
             assert_eq!(
-                verdict.outcome,
+                corroborated.outcome,
                 Outcome::Success,
                 "code={code:?} sig={sig:?}"
             );
-            assert_eq!(verdict.reason, RunReason::RanUntilDeadline);
+            assert_eq!(corroborated.reason, RunReason::RanUntilDeadline);
+
+            let uncorroborated = classify(
+                RawSignals {
+                    timed_out: true,
+                    cpu: not_executing(),
+                    ..signals(code, sig)
+                },
+                5000,
+            );
+            assert_eq!(
+                uncorroborated.outcome,
+                Outcome::Unknown,
+                "code={code:?} sig={sig:?} must not bypass corroboration"
+            );
         }
     }
 
     #[test]
     fn the_deadline_value_appears_in_the_explanation() {
         // An explanation that does not state the deadline cannot be argued with.
-        let verdict = classify(
-            RawSignals {
-                timed_out: true,
-                ..signals(None, None)
-            },
-            1234,
-        );
-        assert!(verdict.explanation.contains("1234"));
+        for cpu in [executing(), not_executing(), None] {
+            let verdict = classify(
+                RawSignals {
+                    timed_out: true,
+                    cpu,
+                    ..signals(None, None)
+                },
+                1234,
+            );
+            assert!(
+                verdict.explanation.contains("1234"),
+                "{} hides the deadline",
+                verdict.reason.id()
+            );
+        }
     }
 
     #[test]
@@ -381,11 +539,32 @@ mod tests {
                 timed_out: false,
                 command_not_executable: false,
                 signal: None,
+                cpu: None,
             },
             8000,
         );
         assert_ne!(verdict.outcome, Outcome::Partial);
         assert_eq!(verdict.reason, RunReason::BackendMissing);
+    }
+
+    #[test]
+    fn a_launcher_failure_outranks_a_corroborated_timeout() {
+        // The ordering must hold even when the CPU evidence says the process was consuming
+        // time: if the launcher could not find the backend, the binary was never started, and
+        // no later signal can retroactively make it have run.
+        let verdict = classify(
+            RawSignals {
+                command_not_found: true,
+                exit_code: Some(127),
+                timed_out: true,
+                command_not_executable: false,
+                signal: None,
+                cpu: executing(),
+            },
+            8000,
+        );
+        assert_eq!(verdict.reason, RunReason::BackendMissing);
+        assert!(!verdict.recordable);
     }
 
     #[test]
@@ -421,6 +600,7 @@ mod tests {
             RunReason::BackendMissing,
             RunReason::BackendNotExecutable,
             RunReason::LauncherFailed,
+            RunReason::DeadlineNotCorroborated,
         ] {
             if reason.describes_the_binary() {
                 assert!(
@@ -429,6 +609,7 @@ mod tests {
                         RunReason::BackendMissing
                             | RunReason::BackendNotExecutable
                             | RunReason::LauncherFailed
+                            | RunReason::DeadlineNotCorroborated
                     ),
                     "{} claims to describe the binary but is a machine failure",
                     reason.id()
@@ -466,6 +647,7 @@ mod tests {
             RunReason::BackendMissing,
             RunReason::BackendNotExecutable,
             RunReason::LauncherFailed,
+            RunReason::DeadlineNotCorroborated,
         ] {
             assert!(seen.insert(reason.id()), "duplicate id: {}", reason.id());
         }
