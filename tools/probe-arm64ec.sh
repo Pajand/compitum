@@ -332,6 +332,24 @@ executes() {
     echo "    $label tree CPU      : baseline=$baseline peak=$peak growth=$growth ticks"
     echo "    $label sustained     : $rate ticks/s (threshold $MIN_TICKS_PER_SECOND, needs $required ticks in ${window}s)"
 
+    # A reading of exactly zero on both samples means the process tree was never SEEN. It cannot
+    # mean "idle", because the self-test above proved the reading works on this host, and a Wine
+    # process that is alive for eight seconds has a launcher doing work regardless of the binary.
+    #
+    # So this is reported as unmeasurable rather than as a negative result. Note what is and is
+    # not established: it is measured that our own children read correctly here and that this
+    # particular tree reads zero; the REASON the tree is invisible is not established, and is
+    # most plausibly that Wine's loader reparents away from the process we spawned. The
+    # conclusion does not depend on that guess -- only the need for a different approach does.
+    if [ "$baseline" -eq 0 ] && [ "$peak" -eq 0 ]; then
+        echo "    $label tree CPU      : ZERO on both samples"
+        echo "    ==> COULD NOT MEASURE: this process tree was never visible to /proc."
+        echo "        The self-test proves the reading works for our own children here, so"
+        echo "        this is about THIS tree, not about the binary. Reported as unmeasured"
+        echo "        rather than as a failure, because a blind reading is not a finding."
+        return 2
+    fi
+
     if [ "$growth" -lt "$required" ]; then
         echo "    ==> TIMED OUT WITHOUT CONSUMING CPU: still starting or blocked, not executing."
         echo "        A file that cannot be loaded at all produces the same reading, so this"
