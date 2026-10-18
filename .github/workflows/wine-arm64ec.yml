@@ -238,11 +238,41 @@ jobs:
       - name: Install into a prefix
         run: |
           cd "$WINE_SRC"
-          make install DESTDIR="$PWD/stage" >/dev/null
+          # `-k` here too. The build deliberately tolerates one failing slice (Wine's bundled
+          # FFmpeg for arm64ec), and `make install` walks the same dependency graph -- so
+          # without `-k` it can stop for a reason already accepted, hours into the run.
+          # Correctness is not weakened: the loader is asserted below, and the ARM64EC
+          # libraries were asserted in the previous step.
+          set +e
+          make install DESTDIR="$PWD/stage" -k >/dev/null 2>&1
+          echo "make install exited $?"
+          set -e
+
           WINE_BIN=$(find "$PWD/stage" -name wine -type f | head -1)
+          if [ -z "$WINE_BIN" ]; then
+            echo "::error::the loader was not installed; cannot verify execution"
+            exit 1
+          fi
           echo "WINE_BIN=$WINE_BIN" >> "$GITHUB_ENV"
-          echo "installed: $WINE_BIN"
-          "$WINE_BIN" --version || true
+
+          # Wine's `wine` is a wrapper script that locates its libraries relative to itself.
+          # Installing under DESTDIR keeps that layout, and this is where it breaks: the
+          # wrapper looks for the loader relative to its own recorded prefix.
+          WINE_PREFIX_DIR=$(dirname "$WINE_BIN")
+          WINE_LIB_DIR=$(dirname "$WINE_PREFIX_DIR")
+          echo "installed : $WINE_BIN"
+          echo "lib dir   : $WINE_LIB_DIR"
+          ls -l "$WINE_LIB_DIR"/wine* 2>/dev/null || true
+
+          if ! "$WINE_BIN" --version; then
+            echo "::warning::the installed wrapper did not report a version; checking the loader"
+            LOADER=$(find "$PWD/stage" -name 'wine64' -o -name 'wine' -type f | head -1)
+            # Wine accepts an explicit library path, which is what an out-of-tree install needs.
+            if ! WINEDLLPATH="$WINE_LIB_DIR" "$WINE_BIN" --version; then
+              echo "::error::the loader could not be invoked at all"
+              exit 1
+            fi
+          fi
 
       - name: Build the test corpus with the tool
         run: |
