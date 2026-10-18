@@ -556,23 +556,22 @@ fn load_lines(text: &str) -> (Vec<Record>, LoadStats) {
 /// user's data rather than beside whatever directory they happened to be in.
 #[must_use]
 pub fn default_path() -> PathBuf {
+    // An explicit override wins, so a script or a CI job can point at its own file.
     if let Ok(explicit) = std::env::var("COMPITUM_LEDGER") {
         if !explicit.is_empty() {
             return PathBuf::from(explicit);
         }
     }
-    let base = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|home| PathBuf::from(home).join(".local/share"))
-        })
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("compitum").join("ledger.jsonl")
+    // Otherwise the community store, resolved through the licence boundary rather than by
+    // building a path here. This used to construct `compitum/ledger.jsonl` directly, which
+    // meant the ODbL/proprietary separation in `crate::store` protected nothing: every
+    // observation, from any source, landed in one file.
+    //
+    // `Store::Community` is the right default because an observation taken on a user's own
+    // machine is a community contribution. Verified data is produced by the project's own test
+    // farm, never by a user running the CLI, and must not be mixed in by accident.
+    crate::store::StoreBoundary::new(crate::store::default_data_root())
+        .ledger_path(crate::store::Store::Community)
 }
 
 #[cfg(test)]

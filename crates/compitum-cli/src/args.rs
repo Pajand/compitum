@@ -73,6 +73,12 @@ pub struct Options {
     pub backends: Option<String>,
     /// Treat all known backends as installed.
     pub assume_backends: bool,
+    /// Which Oracle store to read or write: `community` (the default) or `verified`.
+    ///
+    /// The two stores are licensed differently and are never combined — not on disk, and not in
+    /// a query — so which one is being written to is a decision an operator should make
+    /// explicitly rather than inherit invisibly.
+    pub store: Option<String>,
 }
 
 /// Why parsing failed.
@@ -179,6 +185,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             "--headless" => options.headless_only = true,
             "--no-record" => options.no_record = true,
             "--assume-backends" => options.assume_backends = true,
+            "--store" => options.store = Some(take_value("--store")?),
             "--ledger" => options.ledger_path = Some(take_value("--ledger")?),
             "--lang" => options.lang = Some(take_value("--lang")?),
             "--require" => options.require_feature.push(take_value("--require")?),
