@@ -180,6 +180,56 @@ tree_ticks() {
     '
 }
 
+# Returns 0 when /proc can measure CPU consumption on this machine at all.
+#
+# # Why the probe must test its own instrument first
+#
+# The controls below validate the *subject*: a file known to run must pass, a file known not to
+# run must be rejected. Neither of them validates the *instrument*, and on the CI runner the
+# instrument is what failed. Both CPU samples came back exactly `0` -- a numerical zero, not an
+# unreadable one -- so the probe reported "cannot execute a plain ARM64 binary" about a binary it
+# had never actually measured, and the workflow turned that into "build Wine from source".
+#
+# A zero is only an answer when the thing being watched was capable of producing a non-zero.
+# That is checkable directly: spawn a busy loop whose CPU consumption is certain, and see whether
+# the reading grows. If it does not, no measurement this script makes can be believed, and the
+# honest result is "could not measure" rather than any verdict at all.
+#
+# This is the project's most-repeated lesson, applied to the measurement itself: establish that
+# the instrument works before trusting what it measures.
+#
+# Returns 0 when the instrument works, 1 when it does not.
+instrument_self_test() {
+    # A busy loop under our own control. Its CPU consumption is certain, so a failure to observe
+    # growth is a failure of the reading and of nothing else.
+    ( while :; do :; done ) &
+    burner=$!
+
+    sleep 1
+    first=$(tree_ticks "$burner")
+    sleep 1
+    second=$(tree_ticks "$burner")
+
+    kill "$burner" 2>/dev/null
+    wait "$burner" 2>/dev/null
+
+    if [ -z "$first" ] || [ -z "$second" ]; then
+        echo "  instrument self-test : FAILED -- /proc could not be read for a process we spawned"
+        return 1
+    fi
+
+    growth=$((second - first))
+    if [ "$growth" -le 0 ]; then
+        echo "  instrument self-test : FAILED -- a known-busy process grew by $growth ticks in 1s"
+        echo "                         (/proc reports 0 for its children here, so CPU time"
+        echo "                         cannot distinguish executing from blocked)"
+        return 1
+    fi
+
+    echo "  instrument self-test : PASSED -- a known-busy process grew by $growth ticks in 1s"
+    return 0
+}
+
 # Runs a fixture and reports whether it EXECUTED.
 #
 # Return codes, and the distinction between them is the whole point:
@@ -291,6 +341,32 @@ executes() {
     echo "    ==> EXECUTING: timed out and sustained $rate ticks/s"
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# Step 0: establish that the instrument works, before measuring anything.
+#
+# This runs FIRST, and it is the most important step in the script. On the CI runner the CPU
+# reading returned exactly `0` for a process that was demonstrably executing, so every verdict
+# below it would have been manufactured rather than measured -- and one already was, reported as
+# "ARM64EC does not execute" and nearly acted on.
+#
+# A control that validates the subject cannot catch this. Only a control that validates the
+# instrument can, which is why this exists separately from the positive and negative controls.
+# ---------------------------------------------------------------------------
+echo "=== instrument self-test"
+if ! instrument_self_test; then
+    echo
+    echo "VERDICT: this host cannot measure CPU time, so NOTHING was measured."
+    echo "  A known-busy process showed no growth, which means /proc reports 0 for"
+    echo "  processes launched here. Every conclusion this script could draw would rest"
+    echo "  on that zero, so none is drawn."
+    echo
+    echo "  This is NOT 'ARM64EC does not execute'. It is 'the instrument is blind', and"
+    echo "  the fix is to find a readable CPU source on this host -- not to build Wine."
+    echo "  Exit 3 means exactly that and is distinct from exit 1."
+    exit 3
+fi
+echo
 
 # ---------------------------------------------------------------------------
 # Step 1: find a Wine entry point that can execute our control fixture.
