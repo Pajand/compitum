@@ -61,6 +61,26 @@ name: ARM64EC probe
 #   8. The threshold was scaled by `getconf CLK_TCK` on top of a value that was already in clock
 #      ticks, so a genuine 112 ticks/s was reported as 12725 -- 100x too large, in the direction
 #      that would make a blocked loader look busy.
+#   9. `set -e` leaked out of the `executes` function. A POSIX function is not a subshell, so the
+#      `set -e` that ended a status-capture bracket applied to the rest of the script -- and the
+#      bare `executes ... ; probe_code=$?` call returning 2 aborted the whole probe with status 2
+#      before the status was ever read. An invisible setting defeated the three-state design and
+#      produced an exit code the script does not document. It now runs with `set -u` and
+#      deliberately without `set -e`.
+#  10. **The instrument passed its self-test and the subject was still invisible.** A numerical
+#      zero had passed every check, because nothing verified that the reading *could* be
+#      non-zero. `instrument_self_test` now runs before any Wine is touched, spawning a busy
+#      loop whose consumption is certain. On the runner it PASSES (154 ticks in 1 s) while the
+#      Wine tree still reads exactly 0/0 -- so the reading works for processes we spawn and does
+#      not reach Wine's tree, most plausibly because Wine's loader reparents away from it.
+#
+#      The probe now returns exit 3 for that case and the verdict step reports it as a limitation
+#      of the runner, so the wrong decision -- "build Wine from source" -- can no longer be
+#      reached automatically. **Phase 1.3 stays provisional until the runner can be measured.**
+#
+# Entry 10 is the sharpest of the ten: a self-test that passes proves the reading works
+# *somewhere*, not that it reaches what it is aimed at. Both halves have to be checked, and only
+# checking both revealed which one failed.
 #
 # Every one of those was the measurement reporting something other than what happened. That is
 # the same failure mode as the PE offset bug, the CHPE misidentification, and the three scanner

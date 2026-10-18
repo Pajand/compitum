@@ -781,6 +781,54 @@ control that could fail.
 > measurement that cannot fail cannot support a conclusion. Establishing that the instrument
 > works is not a preliminary to the real work — it is the work.
 
+**2026-10-19 — The runner cannot measure, and the probe now says so**
+
+The strengthened probe was run on the ARM runner. It produced no ARM64EC verdict, and that is
+the correct outcome rather than a failure of the attempt:
+
+```
+=== instrument self-test
+  instrument self-test : PASSED -- a known-busy process grew by 154 ticks in 1s
+    control raw exit code : 124   (124 = the deadline fired)
+    control tree CPU      : baseline=0 peak=0 growth=0 ticks
+    control tree CPU      : ZERO on both samples
+    ==> COULD NOT MEASURE: this process tree was never visible to /proc.
+VERDICT: the control could not be MEASURED, so nothing was learned.
+probe exit: 3
+```
+
+Four successive defects had to be fixed before the probe could say that sentence, and each one
+had been reporting an intent rather than an event:
+
+1. An unreadable reading was reported as a negative result, and the workflow turned it into
+   "build Wine from source" — hours of work justified by an instrument that observed nothing.
+2. A quick exit was treated as unmeasurable, so the probe halted on a negative control that had
+   behaved perfectly.
+3. `set -e` leaked out of a shell function — a POSIX function is not a subshell — so the bare
+   status capture aborted the script with an undocumented exit code before it was read.
+4. A numerical zero passed every check, because nothing verified that the reading *could* be
+   non-zero. The self-test now runs before any Wine is touched, and it passes on the runner while
+   the Wine tree still reads zero.
+
+That gap between those last two facts is the finding: **the instrumentation works for processes
+the probe spawns, and Wine's process tree is not visible to it.** The most plausible cause is
+that Wine's loader reparents away from the spawned process. That is a guess and is labelled as
+one — what is measured is the zero, and the self-test.
+
+The workflow now reports exit 3 as a limitation of the runner rather than a result about
+ARM64EC, so the wrong decision can no longer be reached automatically.
+
+**Consequence: Phase 1.3 stays provisional.** The device run (Wine 6.0.3) is unaffected and its
+controls all behaved, but the ARM64EC result rested on the runner, and the runner's criterion has
+been shown to have been weaker than claimed. Obtaining a real verdict there needs a CPU source
+that survives Wine's reparenting — cgroup accounting, or sampling `wineserver`'s own tree — not
+another change to the criterion. Until then the honest statement is that ARM64EC execution has
+not been *falsifiably* demonstrated.
+
+> **The ninth instance, and the sharpest: the instrument can be validated and the subject still
+> invisible.** A self-test that passes proves the reading works somewhere, not that it reaches
+> what it is aimed at. Both halves were needed, and only checking both revealed which one failed.
+
 ---
 
 ## 7. DECISION LOG
