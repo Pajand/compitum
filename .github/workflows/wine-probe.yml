@@ -1,40 +1,45 @@
 name: ARM64EC probe
 
-# Answers one question in about three minutes, before committing hours to a build:
+# Answers one question in about five minutes, before committing hours to a build:
 #
 #   Can the Wine that the runner already ships execute an ARM64EC binary?
 #
 # # Why this exists
 #
-# The full ARM64EC build takes hours, and the previous attempt stalled after 2h35m. Two
-# facts made that build unnecessary to attempt first:
+# The full ARM64EC build takes hours, and a previous attempt stalled after 2h35m. Two facts
+# make a cheaper check available first:
 #
 #   1. Wine 9.0's release notes state the loader "supports loading ARM64X and ARM64EC
 #      modules", and Wine 10.0 says "the ARM64EC architecture is fully supported".
 #   2. The runner is ubuntu-24.04-arm, whose archive carries Wine 9.0 for arm64.
 #
-# So the runner may already have a working ARM64EC loader installed, one `apt-get install`
-# away. Checking costs minutes; building costs hours. Checking first is simply the cheaper
-# order of operations -- the same reasoning that turned Phase 1's "we must build Wine" into
-# "Wine 6.0.3 is already here and it works" for the native case.
+# Checking costs minutes; building costs hours. Checking first is the cheaper order of
+# operations -- the same reasoning that turned Phase 1's "we must build Wine" into "Wine
+# 6.0.3 is already here and it works" for the native case.
 #
-# # The measurement
+# # Two defects this workflow had, and what they taught
 #
-# `tools/loopcheck.sh` compares the routing prediction against observation, and measures CPU
-# growth rather than an exit code, because a hanging process also times out. That distinction
-# was learned the hard way in this project: an earlier check reported a false pass because it
-# treated a timeout as evidence of execution.
+# 1. `command -v wine64 || command -v wine` fell through to the `wine` **wrapper**, because
+#    Ubuntu's wine64 package does not install a `wine64` on PATH -- the loader lives at
+#    `/usr/lib/wine/wine64`. The wrapper then failed to launch anything, and every fixture
+#    measured +0 jiffies. The workflow now locates the loader explicitly and *proves* it
+#    works on a known-good binary before measuring anything.
+#
+# 2. The verdict step ended with `echo "::error::..."`, which looks like a failure annotation
+#    but does **not** set a non-zero exit status. The job therefore reported SUCCESS while
+#    four of seven fixtures disagreed. That is a false pass, and it is the same defect shape
+#    as every other one found in this project: a check reporting success without having
+#    verified anything. The step now exits non-zero.
 #
 # # What each outcome means
 #
 #   PASS  -> the ARM64EC loader works here; the full build is unnecessary
-#   FAIL  -> the build is required, and this workflow says so with evidence
+#   FAIL  -> the build is required, and this run says so with evidence
 
 on:
   workflow_dispatch:
   push:
     paths:
-      # Re-run when the fixtures or the measurement script change, so this stays honest.
       - 'crates/compitum-pe/tests/corpus/**'
       - 'tools/loopcheck.sh'
       - '.github/workflows/wine-probe.yml'
@@ -43,7 +48,7 @@ jobs:
   probe:
     name: can the runner's Wine run ARM64EC?
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -51,65 +56,137 @@ jobs:
       - name: Install the runner's Wine
         run: |
           sudo apt-get update -qq
-          # `wine64` plus the library package. The runner is arm64, so apt resolves these to
-          # the arm64 builds -- which is what makes the probe meaningful.
-          sudo apt-get install -y -qq wine64 libwine winbind 2>&1 | tail -5 || {
-            echo "::error::could not install wine64 on this runner"
-            exit 1
-          }
+          sudo apt-get install -y -qq wine64 libwine 2>&1 | tail -3
+          echo "--- installed ---"
+          dpkg -l | grep -i '^ii.*wine' | awk '{print "  ", $2, $3, $4}' || true
 
-      - name: Report which Wine we actually got
+      - name: Locate the Wine loader, and prove it runs
+        id: wine
         run: |
-          echo "WINE_BIN=$(command -v wine64 || command -v wine)" >> "$GITHUB_ENV"
-          # The version decides everything below, so it is printed rather than assumed.
-          "$(command -v wine64 || command -v wine)" --version 2>&1 | head -2 || true
-          dpkg -l | grep -i wine | head -8 || true
-          echo "arch: $(uname -m)"
+          # Ubuntu's wine64 package does not put a `wine64` on PATH. An earlier revision used
+          # `command -v wine64 || command -v wine`, which silently fell through to the wrapper;
+          # the wrapper then launched nothing and every measurement read +0. So each candidate
+          # is tested, not assumed.
+          CANDIDATES="
+          /usr/lib/wine/wine64
+          /usr/bin/wine64
+          /usr/bin/wine
+          "
+          FOUND=""
+          for c in $CANDIDATES; do
+            [ -x "$c" ] || continue
+            echo "--- trying $c"
+            if out=$("$c" --version 2>&1); then
+              echo "    reported: $(printf '%s' "$out" | head -1)"
+              # `--version` succeeding is not enough: the wrapper reports a version even when it
+              # cannot launch a program. So a real program is executed as the test.
+              printf 'MZ placeholder' > /tmp/notpe.exe
+              WINEPREFIX=/tmp/wp-probe "$c" /tmp/notpe.exe >/dev/null 2>&1
+              rc=$?
+              if [ "$rc" -ne 127 ] && [ "$rc" -ne 126 ]; then
+                echo "    launched a program (exit $rc) -- accepting"
+                FOUND="$c"
+                break
+              fi
+              echo "    could not launch a program (exit $rc)"
+            else
+              echo "    --version failed"
+            fi
+          done
+
+          if [ -z "$FOUND" ]; then
+            echo "::error::no usable Wine on this runner"
+            echo "The build is therefore required. This is a real result, not a failure of the probe."
+            exit 1
+          fi
+          echo "WINE_BIN=$FOUND" >> "$GITHUB_ENV"
+          echo "using: $FOUND"
+          "$FOUND" --version 2>&1 | head -1
 
       - name: Build the tool
         run: |
           cargo build --release --all-targets
           ./target/release/compitum --version
-          cargo run --release -p compitum-pe --example write_fixture -- /tmp/fixtures
+
+      - name: Prove the toolchain before measuring
+        run: |
+          # A known-good case first. `real-console-4k.exe` is plain ARM64 and was already
+          # proven to execute under Wine 6.0.3 during Phase 1. If it does not run here, the
+          # environment is wrong and no conclusion about ARM64EC can be drawn.
+          export WINEPREFIX=/tmp/wp-probe
+          export WINEDEBUG=-all
+          mkdir -p /tmp/corpus-ci
+          cp crates/compitum-pe/tests/corpus/*.exe /tmp/corpus-ci/
+
+          echo "--- wineboot ---"
+          "$WINE_BIN" wineboot -i >/dev/null 2>&1 || true
+          "$WINE_BIN" wineserver -k >/dev/null 2>&1 || true
+          sleep 2
+
+          echo "--- control: plain ARM64, previously proven to run ---"
+          "$WINE_BIN" /tmp/corpus-ci/real-console-4k.exe >/tmp/ctrl.log 2>&1 &
+          sleep 4
+          a=0; b=0
+          for p in /proc/[0-9]*; do
+            cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+            case "$cmd" in *real-console-4k*) st=$(cat "$p/stat" 2>/dev/null) || continue
+              rest=${st#*) }; set -- $rest; a=$(( a + ${12:-0} + ${13:-0} )) ;; esac
+          done
+          sleep 4
+          for p in /proc/[0-9]*; do
+            cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+            case "$cmd" in *real-console-4k*) st=$(cat "$p/stat" 2>/dev/null) || continue
+              rest=${st#*) }; set -- $rest; b=$(( b + ${12:-0} + ${13:-0} )) ;; esac
+          done
+          "$WINE_BIN" wineserver -k >/dev/null 2>&1 || true
+          pkill -f real-console 2>/dev/null || true
+          echo "  CPU growth: +$((b - a)) jiffies in 4 s"
+          echo "  wine stderr:"
+          head -6 /tmp/ctrl.log | sed 's/^/    /'
+
+          if [ $((b - a)) -lt 150 ]; then
+            echo "::error::the control case did not execute, so ARM64EC cannot be judged from this run"
+            echo "This is an environment problem, not an ARM64EC result."
+            exit 1
+          fi
+          echo "control passed: the environment can execute ARM64"
 
       - name: Run the prediction-versus-observation check
         id: loopcheck
         run: |
-          mkdir -p /tmp/corpus-ci
-          cp crates/compitum-pe/tests/corpus/*.exe /tmp/corpus-ci/
-          echo "--- corpus ---"
-          ls -1 /tmp/corpus-ci/
-
           chmod +x tools/loopcheck.sh
-          # WINE is passed explicitly. A bare `wine` would resolve to whatever is first on
-          # PATH, which is how a previous attempt would have measured the wrong binary.
           export WINE="$WINE_BIN"
-          export WINEPREFIX=/tmp/wineprefix-probe
-
+          export WINEPREFIX=/tmp/wp-probe
           set +e
           sh tools/loopcheck.sh ./target/release/compitum /tmp/corpus-ci
           code=$?
           set -e
           echo "loopcheck exit: $code"
-          echo "loopcheck_code=$code" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
 
-      - name: Decide whether the ARM64EC loader worked
+      - name: Verdict
         run: |
-          # The routed output already shows the table; this step turns it into a verdict.
-          #
-          # A pass means the runner's own Wine handled every fixture, including the ARM64EC
-          # one, so no build is needed. A failure means it did not, which is exactly the
-          # evidence the build workflow needs to justify its cost.
-          if [ "${{ steps.loopcheck.outputs.loopcheck_code }}" = "0" ]; then
-            echo "### ARM64EC works on the runner's Wine" >> "$GITHUB_STEP_SUMMARY"
-            echo >> "$GITHUB_STEP_SUMMARY"
-            echo "No build is needed. The loader installed by apt handled every corpus file," >> "$GITHUB_STEP_SUMMARY"
-            echo "including the ARM64EC fixture, and matched every routing prediction." >> "$GITHUB_STEP_SUMMARY"
+          CODE="${{ steps.loopcheck.outputs.code }}"
+
+          if [ "$CODE" = "0" ]; then
+            {
+              echo "### ARM64EC works on the runner's Wine"
+              echo
+              echo "No build needed. Wine $( "$WINE_BIN" --version 2>&1 | head -1 ) handled every"
+              echo "corpus file, including the ARM64EC fixture, matching every routing prediction."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          echo "### ARM64EC did not work on the runner's Wine" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "This is the evidence that justifies building Wine from source. The table above" >> "$GITHUB_STEP_SUMMARY"
-          echo "shows which fixtures failed." >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::the ARM64EC fixture was not executed by the runner's Wine"
+          {
+            echo "### ARM64EC did not work on the runner's Wine"
+            echo
+            echo "This is the evidence that justifies building Wine from source."
+            echo "The control case passed, so the environment is sound and the failure is real."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `echo "::error::..."` looks like a failure annotation but does NOT set a non-zero
+          # exit status. An earlier revision ended here, so the job reported SUCCESS while four
+          # of seven fixtures disagreed -- a false pass. An explicit exit is the fix.
+          echo "::error::ARM64EC was not executed by the runner's Wine"
+          exit 1
