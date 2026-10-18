@@ -306,6 +306,66 @@ version number, so it must be right the first time.
 **Phase 0 is complete.** Six implemented crates, 312 tests, zero build warnings, zero
 third-party dependencies, and a gate that runs on ARM64 and on x86_64.
 
+**2026-10-18 — Real toolchain output, and two errors it exposed**
+
+Installed clang and lld (LLVM 17, available for aarch64 in Alpine), produced genuine Windows
+ARM64 binaries, and asked our own parser to classify them. The result was the most valuable
+hour of the project so far: **two errors that 325 synthetic-fixture tests could not see.**
+
+*Error 1: the PE optional header was read at the wrong offsets.*
+
+The parser chained field offsets from `SectionAlignment` and had drifted eight bytes by the
+time it reached `Subsystem`. On a real binary it read `Subsystem` as 4096 instead of 3, and
+read the data-directory array from the middle of unrelated header fields.
+
+It was invisible because **the fixture builder chained from the same anchor**, so the writer
+and the reader agreed with each other while both disagreed with reality. A fixture that shares
+an assumption with the code under test cannot detect that assumption being wrong.
+
+The dangerous direction: a GUI application would have been reported as headless-capable,
+routing a display-dependent program into a pipeline where it cannot run.
+
+*Error 2: hybrid images cannot be identified by machine type.*
+
+The project's headline claim is that it distinguishes the three ARM64 flavours. It did so by
+reading the COFF machine field, using `0xA641` for ARM64EC and `0xA64E` for ARM64X. **Those
+are not valid final PE machine types.** Microsoft states that `0xA641` "is an internal MSVC
+identifier used for Arm64EC object files and is not defined in winnt.h", and that only the
+linked image carries the `8664 (x64) (ARM64X)` or `AA64 (ARM64) (ARM64X)` value.
+
+A linked ARM64EC executable therefore reports `0x8664` — indistinguishable from plain x86-64
+without reading CHPE metadata. The headline differentiation was resting on constants that
+real linked binaries never carry.
+
+*What was built in response*
+
+| Addition | Purpose |
+|---|---|
+| `crates/compitum-pe/src/chpe.rs` | Reads CHPE metadata through the load configuration; documents that `CHPEMetadataPointer` is a virtual address, not an RVA |
+| `crates/compitum-pe/tests/corpus/` | Four real binaries of 1024 bytes each, plus a manifest, 6.3 KiB in total, with per-file digests and the producing toolchain recorded |
+| `tools/make_corpus.py` | Regenerates and verifies the corpus; cross-checks every file against an independent reading of its raw bytes |
+| `crates/*/tests/real_toolchain.rs` | 21 tests over real toolchain output (13 parser, 8 router), the only tests that can catch a shared assumption being wrong |
+
+*A regression introduced while fixing error 2, and caught*
+
+`family()` briefly routed **every** machine value through the new hybrid classifier, which
+knows three outcomes. I386, Itanium, RISC-V, LoongArch, PowerPC and unrecognized values all
+collapsed to x86-64. Three existing router tests caught it: a 32-bit x86 image would have
+routed to Box64 instead of WOW64, and an Itanium image would have become translatable instead
+of unsupported. The machine field is now consulted first and stays authoritative for every
+value except the four a hybrid image can carry. Four new tests pin that.
+
+*The lesson, stated once*
+
+Synthetic fixtures verify that the code does what the author intended. Only third-party output
+verifies that the author's intent matched the format. Both matter; only one was present until
+now. Going forward, a new format assumption must be accompanied by a real artifact that tests
+it.
+
+**Verified at this revision:** 360 tests passing (21 of them against real toolchain output),
+zero build warnings, zero clippy diagnostics, zero third-party dependencies, CI green on
+ARM64 and x86_64.
+
 ---
 
 ## 7. DECISION LOG

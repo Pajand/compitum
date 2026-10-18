@@ -48,12 +48,42 @@ ecosystem. Overnight, a large fraction of future Windows software began moving t
 
 But "ARM64 binary" is not one thing. It is three structurally different things:
 
-| Flavour | `Machine` | Contains | Executes natively? |
+| Flavour | Machine type in a **linked** image | How it is *actually* identified | Contains |
 |---|---|---|---|
-| ARM64 | `0xAA64` | pure AArch64 | **yes** |
-| ARM64EC | `0xA641` | AArch64 **and x86-64** | no — hybrid |
-| ARM64X | `0xA64E` | both slices, load-time dispatch | yes, after slice selection |
-| AMD64 | `0x8664` | x86-64 only | no |
+| ARM64 | `0xAA64` | machine type alone | pure AArch64 |
+| ARM64EC | **`0x8664`** | `0x8664` **plus CHPE metadata** | AArch64 **and x86-64** |
+| ARM64X | **`0xAA64`** | `0xAA64` **plus CHPE metadata** | both slices, load-time dispatch |
+| plain x86-64 | `0x8664` | `0x8664`, no CHPE metadata | x86-64 only |
+
+Read that middle column carefully, because it is the part almost every tool gets wrong.
+
+`0xA641` and `0xA64E` look like the obvious machine types for ARM64EC and ARM64X, and they
+appear in toolchain output — but Microsoft states they are *internal MSVC object-file
+identifiers* and **not valid final PE machine types**:
+
+> "When inspecting intermediate OBJ or LIB files ... `link /dump /headers` shows
+> `A641 machine (ARM64EC)`. This value (0xA641) is an internal MSVC identifier used for Arm64EC
+> object files and is **not defined in winnt.h**. It is **not a valid final PE machine type** —
+> only the linked EXE or DLL carries the `8664 (x64) (ARM64X)` or `AA64 (ARM64) (ARM64X)`
+> machine value."
+
+So a linked ARM64EC executable reports `0x8664`, which is **indistinguishable from plain x86-64
+by machine type alone**. The distinction lives in CHPE metadata, reachable through the
+load-configuration directory:
+
+```text
+optional header
+  └── data directory [10]  ->  IMAGE_LOAD_CONFIG_DIRECTORY64
+        └── +0xC8  CHPEMetadataPointer   (a VIRTUAL ADDRESS, not an RVA)
+              └── IMAGE_ARM64EC_METADATA
+                    +0x00  Version    1 = ARM64EC,  2 = ARM64X
+                    +0x08  CodeMapCount
+```
+
+This project got it wrong first and found out the hard way, by compiling a real ARM64EC
+executable with clang and lld-link and asking our own classifier to identify it. The full
+story is recorded in `crates/compitum-pe/src/chpe.rs`, and the evidence is a committed corpus
+of real toolchain output.
 
 Every compatibility tool in this space collapses that table to a single row. COMPITUM does not.
 
@@ -90,8 +120,10 @@ can be **audited rather than merely believed**.
 
 ## The three things nobody else does
 
-**1. PE-aware ABI classification** — reads the real `IMAGE_FILE_MACHINE` type, import table,
-subsystem and ISA usage out of the binary, keeping the three ARM64 flavours distinct.
+**1. Hybrid-aware ABI classification** — reads the machine type, the CHPE metadata the machine
+type cannot express, the import table, the subsystem and the ISA usage out of the binary,
+keeping the three ARM64 flavours genuinely distinct. Machine type alone is not enough: a
+linked ARM64EC executable reports `0x8664`, exactly like plain x86-64.
 
 **2. Host capability oracle** — probes the *actual* CPU feature set, memory page size and kernel
 ABI, then compares it against what the binary requires. A refusal names the missing feature
