@@ -459,6 +459,62 @@ remains the right answer, but for the **hybrid case only**, which is a narrower 
 roadmap originally planned for. Full measurements and reproduction steps are in
 `docs/PHASE1-FEASIBILITY.md`.
 
+### Phase 1: three of four tasks met
+
+| # | Task | Evidence |
+|---|---|---|
+| 1.1 | Native ARM64 execution | `real-console-4k.exe` ran; 6.6 CPU-seconds measured in an 8-second window |
+| 1.2 | Prediction matched observation | 6 of 6, `tools/loopcheck.sh`, separation `+0` vs `+420` jiffies |
+| 1.3 | ARM64EC hybrid execution | ⚠️ Wine 11.20 configures `arm64ec`; build stops at one FFmpeg assembler directive |
+| 1.4 | NT syscall translation | four distinct exit codes propagated exactly |
+
+**Task 1.4 — the syscall layer — is proven with a control.** A binary that only loops exercises
+loading; one that calls into `kernel32` exercises the syscall layer. The probe's entire body is
+`ExitProcess(code)`, and a single run returning 42 would be weak because 42 could be a
+coincidence. So it was built four times:
+
+| Argument | Wine's exit status | |
+|---|---|---|
+| 0 | 0 | MATCH |
+| 7 | 7 | MATCH |
+| 42 | 42 | MATCH |
+| 99 | 99 | MATCH |
+
+Four independent values propagating correctly rules out coincidence. Wine resolves ARM64
+Windows imports and translates NT syscalls on this device.
+
+**A defect this work exposed, and a serious one.** Before running the probe, COMPITUM was asked
+whether it would run, and answered **REFUSED — needs SME**. The program is `ExitProcess(42)`; it
+needs no SME. The tool was telling its user that a working binary would not work.
+
+Measured cause:
+
+```text
+SME across 4736 words: 121 hits, 121 on padding, 0 on real code
+```
+
+Every hit was `0xCCCCCCCC`, the `int3` fill lld writes to align a section. The rule covered
+3.12% of the 32-bit encoding space — about 1 word in 32 — so it matched almost anything while
+detecting nothing. Fixing it exposed worse: the MTE and SME rules in the system-instruction
+block were **also unreachable**, because a shared outer guard required bits that every inner
+rule contradicted. MTE and SME were never detected by those paths at all, and no test noticed
+because each rule also had a unit test calling it out of context, where the enclosing condition
+never applied.
+
+Three fixes and a generalised guard:
+
+1. `is_padding` rejects the four fill words a linker emits. Padding is not an instruction.
+2. The SME band rule is removed. A rule with zero true positives is not a heuristic.
+3. Every rule in the system-instruction block now carries its **complete** mask, so no
+   enclosing condition can contradict it and reachability is checkable by inspection.
+4. `every_rule_is_reachable_through_the_real_entry_point` feeds one representative word per rule
+   through `scan_code`, which applies the enclosing conditions exactly as production does. A
+   unit test that calls a rule directly cannot detect a condition that excludes it — that is the
+   lesson, and the test encodes it.
+
+Verified after the fix: the probe binary routes `NATIVE` at 100% confidence instead of being
+refused, and all six corpus files route correctly and unchanged.
+
 ### Revised Phase 1
 
 | # | Task | Status |
@@ -466,7 +522,7 @@ roadmap originally planned for. Full measurements and reproduction steps are in
 | 1.1 | Native ARM64 execution under Wine | ✅ **met** — measured, documented |
 | 1.2 | **Prediction matched observation, end to end** | ✅ **met** — 6 of 6, `tools/loopcheck.sh` |
 | 1.3 | ARM64EC hybrid execution | ⚠️ **one directive wide** — Wine 11.20 configures `arm64ec`; build stops at `.arch_extension dotprod` in bundled FFmpeg |
-| 1.4 | NT syscall translation beyond process startup | ⬜ untested; needs a binary that makes calls |
+| 1.4 | **NT syscall translation** | ✅ **met** — four exit codes (0, 7, 42, 99) propagated exactly through Wine from a real ARM64 `ExitProcess` call |
 
 **Task 1.3 (ARM64EC) narrowed to one directive.** The blocker was investigated rather than
 assumed, and it is now three measured facts:

@@ -2,9 +2,10 @@
 
 **Date:** 2026-10-18
 **Status:** measured on the development device
-**Verdict:** the execution bridge is **already partly working and now verified end to end**
-for native ARM64 — six of six routing predictions matched observation. The remaining gap is
-ARM64EC, and it is a dated version floor rather than an open research problem.
+**Verdict:** the execution bridge **works today** for native ARM64, and is verified beyond
+loading — six of six routing predictions matched observation, and NT syscall translation is
+proven by four distinct exit codes propagating through Wine. The remaining gap is ARM64EC, and
+it is a dated version floor rather than an open research problem.
 
 ---
 
@@ -253,6 +254,76 @@ and the CHPE identification — were of the same shape: a system agreeing with i
 > never report the second as the first.
 
 The 150-jiffie threshold and the zero-comparison guard are both instances of that rule.
+
+## Phase 1.4 met: NT syscall translation works
+
+Proving that Wine *loads* an ARM64 image is not the same as proving it translates the NT
+syscalls the image makes. A binary whose entry point loops forever exercises loading; one that
+calls into `kernel32` exercises the syscall layer.
+
+### The probe
+
+An ARM64 Windows program was built whose entire body is a single call:
+
+```c
+__declspec(dllimport) void __stdcall ExitProcess(unsigned int code);
+void __stdcall entry(void) { ExitProcess(code); for (;;) { } }
+```
+
+A `.def` file plus `llvm-dlltool -m arm64` produced the import library, because no
+ARM64 Windows CRT is packaged for this distribution. The linked image declares one import:
+
+```console
+$ llvm-readobj --coff-imports ntcall-arm64.exe
+  Format: COFF-ARM64
+  Import { Name: kernel32.dll
+           Symbol: ExitProcess (0) }
+```
+
+### Why the exit status is the evidence
+
+`ExitProcess` terminates the process with the value it is given. If Wine resolves the import,
+executes the ARM64 code, and translates the syscall, **Wine's own process exit status becomes
+that value**. That is a closed loop with no interpretation required.
+
+A single run returning 42 would be weak — 42 could be a coincidence. So the program was built
+four times with different arguments, and the status tracked each one exactly:
+
+| Argument | Wine's exit status | |
+|---|---|---|
+| 0 | 0 | MATCH |
+| 7 | 7 | MATCH |
+| 42 | 42 | MATCH |
+| 99 | 99 | MATCH |
+
+Four independent values propagating correctly rules out coincidence. **Wine 6.0.3 resolves
+ARM64 Windows imports and translates NT syscalls on this device.**
+
+### An honest note on the accompanying message
+
+Each run also printed:
+
+```text
+wine: Unhandled page fault on read access to 0000000000000028 at address ...
+```
+
+This appears *alongside* a correct exit status, which means the call completed and the fault
+happened afterwards — in Wine's own teardown or debugger startup, not in the probe. It is
+recorded rather than omitted because it is unexplained, and a reader deserves to know that a
+message appears which this investigation did not chase down. It does not affect the result: a
+fault inside the probe would not produce four distinct correct exit codes.
+
+### What this establishes, and what it does not
+
+**Established:** the NT syscall layer works for native ARM64 Windows binaries. Combined with
+earlier results, Phase 1 has now shown loading, execution, and syscall translation.
+
+**Not established:** anything about ARM64EC. The probe is a pure ARM64 image. The hybrid case
+remains behind the version floor described in the next section.
+
+**Also not established:** that arbitrary real applications run. The probe calls one function. A
+program calling hundreds of NT entry points across graphics, threads and the registry exercises
+far more surface, and this probe says nothing about that.
 
 ## The ARM64EC gap, measured precisely
 
