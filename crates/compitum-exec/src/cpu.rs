@@ -395,51 +395,80 @@ mod tests {
         assert_eq!(sampler.sample_count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_real_process_consumes_measurable_cpu() {
-        // The sampler must work on an ordinary process before its readings can be trusted to
-        // mean anything about Wine. A sampler that always returned zero would pass every
-        // other test in this file.
-        let mut sampler = CpuSampler::new(std::process::id());
-        sampler.sample().expect("/proc is readable in tests");
+    fn a_busy_child_process_accumulates_cpu_in_its_tree() {
+        // The sampler must work on a real child process before its readings mean anything about
+        // Wine, and the shape matters: this is exactly production, where the sampled process is
+        // a child rather than the current thread.
+        //
+        // An earlier version of this test burned CPU in the test thread itself with a counting
+        // loop, and it passed in debug and failed in `--release` on CI. The optimiser folded the
+        // loop into a constant, so no CPU was burned, the reading was genuinely zero, and the
+        // assertion fired. The test was measuring the compiler, not the sampler.
+        //
+        // Two further reasons to spawn rather than self-sample: `cargo test` runs tests in
+        // threads, and whether `/proc/<tgid>/stat` aggregates thread time is not something this
+        // test should depend on; and a child is what the runner actually observes.
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
 
-        let mut spin = 0u64;
-        for i in 0..60_000_000u64 {
-            spin = spin.wrapping_add(i);
-        }
-        assert!(spin > 0, "the loop must not be optimised away");
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("while :; do :; done")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("/bin/sh must exist for this test");
 
-        sampler.sample().expect("still readable");
-        let evidence = sampler.evidence(1000).expect("measured");
+        let mut sampler = CpuSampler::new(child.id());
+        sampler.sample().expect("/proc must be readable");
+
+        // Long enough to accumulate several ticks at any plausible HZ, without making the suite
+        // slow: Linux counts in 100 Hz ticks by default, so 400 ms is about 40 of them.
+        std::thread::sleep(Duration::from_millis(400));
+        sampler.sample().expect("/proc must be readable");
+
+        let peak_while_running = sampler.evidence(400).expect("measured").peak_ticks;
+
+        let _ = child.kill();
+        let _ = child.wait();
+
         assert!(
-            evidence.peak_ticks > 0,
-            "the test process burned CPU, so a peak of zero means the sampler is broken"
+            peak_while_running > 0,
+            "a busy child consumed CPU, so a peak of zero means the sampler is broken"
+        );
+
+        // The process is gone now. A further sample must not reduce the peak: the process is
+        // killed at the deadline in production, so a final reading is frequently zero for
+        // exactly the case the peak exists to survive.
+        sampler.sample();
+        assert!(
+            sampler.evidence(400).expect("measured").peak_ticks >= peak_while_running,
+            "the peak must not fall when the process disappears"
         );
     }
 
     #[test]
-    fn the_peak_survives_a_process_that_disappears() {
-        // The process is killed at the deadline and its `/proc` entry vanishes, so a final
-        // reading is frequently zero for exactly the case under investigation.
-        let mut sampler = CpuSampler::new(std::process::id());
-        sampler.sample().expect("readable");
-        let mut spin = 0u64;
-        for i in 0..40_000_000u64 {
-            spin = spin.wrapping_add(i);
-        }
-        sampler.sample().expect("readable");
-        let peak = sampler.evidence(1000).expect("measured").peak_ticks;
-        assert!(peak > 0);
+    fn a_sampler_that_never_sampled_reports_none_not_zero() {
+        // "I did not look" is not "I looked and found nothing". A sampler whose `/proc` reads
+        // all failed must not become indistinguishable from one that measured real silence.
+        let sampler = CpuSampler::new(std::process::id());
+        assert_eq!(sampler.evidence(1000), None);
+        assert_eq!(sampler.sample_count(), 0);
+    }
 
-        // Simulate the entry vanishing by sampling a pid that does not exist while keeping
-        // the peak: the root is remembered, so the total does not collapse to zero.
-        let mut vanished = CpuSampler::new(4_000_000_000);
-        vanished.sample();
-        let evidence = vanished.evidence(500);
-        assert!(
-            evidence.is_some(),
-            "an unreadable tree is still a measurement"
-        );
+    #[test]
+    fn an_impossible_pid_is_a_measurement_not_a_failure() {
+        // `/proc` is readable, the pid simply is not there. That is a successful measurement of
+        // an empty tree, so it is `Some(0)` rather than `None` -- the distinction the caller
+        // relies on to tell a broken instrument from an absent process.
+        let mut sampler = CpuSampler::new(4_000_000_000);
+        assert_eq!(sampler.sample(), Some(0));
+        let evidence = sampler.evidence(500).expect("measured");
+        assert_eq!(evidence.peak_ticks, 0);
+        assert!(!evidence.shows_execution());
     }
 
     #[test]
