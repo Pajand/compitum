@@ -155,15 +155,52 @@ $ nice -n 5 make -j"$(nproc)"
 files before reaching the blocker, and includes three external sub-libraries plus 747 PE
 builtins per architecture.
 
-### Environment hazard worth knowing
+### The environment hazard, measured
 
-Repeated attempts were **killed after running for a while** in this development environment. The
-Android host reclaims memory from long-running processes, which is the risk the roadmap named
-when it listed memory as a Phase 1 hazard.
+This was guessed at first and then tested, because "the build keeps dying" is not a diagnosis.
 
-So: run this in a session that can stay alive for hours — a CI job, a `tmux` pane, or
-`setsid nohup` with output redirected to a file — and check progress by counting object files
-rather than by watching the terminal:
+**Test 1 — does a detached process survive?** A trivial script was launched with
+`setsid nohup`, writing a timestamped line every five seconds for ten minutes.
+
+```text
+launched : 05:40:22
+ticks recorded : 1 of 120
+```
+
+It was killed after roughly five seconds. **Detachment does not work here**, so `setsid`,
+`nohup` and background jobs are not a route to a long build.
+
+**Test 2 — does a long foreground call survive?** The harness terminates a call after 300
+seconds with no output. A `make` produces continuous output, so this is the question that
+matters. A loop was run emitting a line every 20 seconds:
+
+```text
+tick 1 at 05:45:57
+tick 2 at 05:48:49
+tick 3 at 05:50:00
+tick 4 at 05:52:34
+```
+
+It survived the full 400-second allowance, so **foreground work with continuous output is
+viable.** But read the timestamps: a 20-second sleep took between 60 and 170 seconds of wall
+time. The environment is throttled by roughly **3× to 8×**.
+
+So a build that takes one to two hours on a normal machine would take **many hours here**, in
+foreground chunks, because nothing may run in the background.
+
+**The conclusion is a change of plan, not a workaround.** A multi-hour build belongs on a
+machine that is not a phone. The build was therefore moved to CI:
+
+* `.github/workflows/wine-arm64ec.yml` builds Wine with ARM64EC on GitHub's ARM64 runner.
+* It is `workflow_dispatch` only — a build this heavy must not run on every push.
+* It verifies its own result with the corpus and `tools/loopcheck.sh`, so the artifact it
+  produces is evidence rather than a binary nobody checked.
+
+Nothing about the blocker changes: the one-line `HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE` fix is still
+the fix. What changes is where the build runs.
+
+Progress can still be checked by counting object files, which is cheaper than watching a
+terminal:
 
 ```bash
 find . -name '*.o' | wc -l

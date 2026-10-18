@@ -34,6 +34,10 @@ set -u
 COMPITUM="${1:-/root/compitum}"
 CORPUS="${2:-/root/corpus}"
 WINEPREFIX="${WINEPREFIX:-/tmp/wineprefix-loop}"
+# The Wine to measure with. Honour an explicit override, because a freshly built Wine usually
+# lives outside PATH and using the wrong one would silently measure the wrong thing — the exact
+# class of mistake this script's history is full of.
+WINE="${WINE:-wine}"
 export WINEPREFIX
 export WINEDEBUG=-all
 
@@ -55,9 +59,10 @@ fi
 # prefix, so it is paid once, up front, and the prefix is reused afterwards.
 # ---------------------------------------------------------------------------
 if [ ! -d "$WINEPREFIX" ] || [ -z "$(ls -A "$WINEPREFIX" 2>/dev/null)" ]; then
+    "$WINE" --version 2>/dev/null | sed 's/^/wine: /'
     echo "initialising the Wine prefix once (its setup cost would otherwise swamp the measurement)"
-    wineboot -i >/dev/null 2>&1
-    wineserver -k >/dev/null 2>&1
+    "$WINE" wineboot -i >/dev/null 2>&1
+    "$WINE" wineserver -k >/dev/null 2>&1
     sleep 1
 fi
 
@@ -106,13 +111,13 @@ for binary in "$CORPUS"/*.exe; do
     fi
 
     # ---- the measurement: CPU growth across two windows ----
-    wine "$binary" >/dev/null 2>&1 &
+    "$WINE" "$binary" >/dev/null 2>&1 &
     sleep 4
     first=$(cpu_jiffies "$name")
     sleep 4
     second=$(cpu_jiffies "$name")
     growth=$(( second - first ))
-    wineserver -k >/dev/null 2>&1
+    "$WINE" wineserver -k >/dev/null 2>&1
     pkill -f "$name" >/dev/null 2>&1
     sleep 1
 

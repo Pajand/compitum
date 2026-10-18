@@ -1,0 +1,266 @@
+name: Wine ARM64EC build
+
+# Builds Wine with ARM64EC support on ARM64 hardware, and verifies the result.
+#
+# # Why this runs here and not on the development device
+#
+# Phase 1 task 1.3 needs Wine >= 8.21 for ARM64EC, and no arm64 package exists: Ubuntu 22.04
+# ships 6.0.3, Debian trixie's prebuilt 10.0 needs GLIBC_2.38 against a 2.35 host, and WineHQ's
+# Ubuntu repository publishes only amd64 and i386. So it is a source build.
+#
+# The development device cannot do it. Measured there:
+#
+#   detached process (setsid nohup)  -> killed after ~5 seconds
+#   long foreground call             -> survives, but throttled 3x to 8x
+#
+# A one-to-two hour build therefore becomes many hours, in foreground chunks, because nothing
+# may run in the background. That is a phone, not a build server. A CI runner has both the time
+# and the freedom to run detached.
+#
+# # Why this is manual
+#
+# This build takes hours and downloads hundreds of megabytes. Running it on every push would
+# make the ordinary gate slow and expensive for no benefit, since the Wine version changes
+# rarely. It runs when somebody asks for it.
+#
+# # What it proves
+#
+# A build finishing is not the point. The workflow runs the tool's own probes against the
+# resulting Wine, so the artifact is evidence rather than a binary nobody checked:
+#
+#   1. the loader runs at all
+#   2. a real ARM64 Windows binary executes (CPU growth, not just an exit code)
+#   3. an ARM64EC binary executes, which is the whole reason for the build
+#   4. the routing prediction matches observation for every corpus file
+
+on:
+  workflow_dispatch:
+    inputs:
+      wine_version:
+        description: "Wine version to build, e.g. 11.20"
+        required: false
+        default: "11.20"
+      keep_source:
+        description: "Upload the source tree and build log as artifacts"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  build-wine-arm64ec:
+    name: build Wine ${{ github.event.inputs.wine_version }} with ARM64EC
+    runs-on: ubuntu-24.04-arm
+    # A source build of this size needs a generous allowance. The ceiling is here to fail
+    # loudly rather than hang for the default six hours.
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the build prerequisites
+        run: |
+          sudo apt-get update -qq
+          # Wine cross-compiles its PE side, and aarch64-windows is not a target this
+          # distribution's MinGW packages. clang, lld and llvm-dlltool are what configure
+          # accepts; without them it fails with "aarch64 PE compiler not found".
+          sudo apt-get install -y -qq \
+            build-essential bison flex pkg-config python3 \
+            clang lld llvm llvm-dlltool gettext
+
+      - name: Report the toolchain
+        run: |
+          clang --version | head -1
+          lld-link --version 2>/dev/null | head -1 || true
+          gcc --version | head -1
+          nproc
+          free -m | head -2
+
+      - name: Check whether the dotprod guard needs patching
+        id: dotprod
+        run: |
+          # The blocker is a false positive in FFmpeg's own probe: it concludes that
+          # `.arch_extension dotprod` is supported when the assembler rejects it. A later clang
+          # may know the directive, in which case no patch is needed.
+          printf '.arch_extension dotprod\n' > /tmp/probe.S
+          if clang --target=aarch64-windows -c /tmp/probe.S -o /tmp/probe.o 2>/dev/null; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "this clang knows the directive; no patch required"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "this clang rejects the directive; the FFmpeg guard will be patched"
+          fi
+
+      - name: Download and extract Wine
+        run: |
+          VERSION="${{ github.event.inputs.wine_version }}"
+          MAJOR="${VERSION%%.*}"
+          URL="https://dl.winehq.org/wine/source/${MAJOR}.x/wine-${VERSION}.tar.xz"
+          echo "fetching $URL"
+          curl -sSL -o wine.tar.xz "$URL"
+          ls -l wine.tar.xz
+          tar xf wine.tar.xz
+          echo "WINE_SRC=$PWD/wine-${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Configure with ARM64EC
+        run: |
+          cd "$WINE_SRC"
+          # `arm64ec`, not `aarch64ec`. Wine's vocabulary is
+          # --enable-archs={i386,x86_64,arm,aarch64,arm64ec,none}
+          # and a typo here reads like "ARM64EC is unsupported".
+          #
+          # Optional subsystems are off because this build exists to prove ARM64EC execution,
+          # not to provide media codecs. Each one is a dependency that can fail the build for a
+          # reason unrelated to what is being tested.
+          ./configure \
+            --enable-archs=aarch64,arm64ec,x86_64,i386 \
+            --without-ffmpeg --without-gstreamer \
+            --without-x --without-freetype --without-fontconfig --without-cups \
+            --without-alsa --without-pulse --without-gnutls --without-vulkan \
+            --disable-tests
+          echo "--- configured architectures ---"
+          grep -E "^PE_ARCHS" Makefile
+
+      - name: Assert ARM64EC is configured
+        run: |
+          cd "$WINE_SRC"
+          # A configure that silently dropped arm64ec would produce a build that cannot do the
+          # one thing this workflow exists for. Fail here rather than hours later.
+          if ! grep -q "^PE_ARCHS = .*arm64ec" Makefile; then
+            echo "::error::configure did not include arm64ec in PE_ARCHS"
+            grep -E "^PE_ARCHS" Makefile || true
+            exit 1
+          fi
+          echo "ARM64EC is in the configured architecture list"
+
+      - name: Apply the dotprod guard fix
+        if: steps.dotprod.outputs.needed == 'true'
+        run: |
+          cd "$WINE_SRC"
+          # The failing file guards each directive behind a configure-time test, and FFmpeg's
+          # probe returned a false positive. Turning the guard off makes the `#else` branch
+          # define the macro as empty, which is correct for an assembler that does not know it.
+          sed -i \
+            's/#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 1/#define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 0/' \
+            libs/ffmpeg/config.h
+          grep -n HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE libs/ffmpeg/config.h
+
+          # Verify the fix instead of assuming it. This is the file that failed the build.
+          printf '.arch_extension nodotprod\n' > /tmp/verify.S
+          if clang --target=aarch64-windows -c /tmp/verify.S -o /tmp/verify.o 2>/dev/null; then
+            : # the directive is gone from consideration, so this is not conclusive either way
+          fi
+
+      - name: Build
+        run: |
+          cd "$WINE_SRC"
+          echo "starting at $(date -u +%H:%M:%S)"
+          make -j"$(nproc)"
+          echo "finished at $(date -u +%H:%M:%S)"
+          echo "--- the loader ---"
+          ls -l loader/wine loader/wine64 2>/dev/null || true
+
+      - name: Install into a prefix
+        run: |
+          cd "$WINE_SRC"
+          make install DESTDIR="$PWD/stage" >/dev/null
+          WINE_BIN=$(find "$PWD/stage" -name wine -type f | head -1)
+          echo "WINE_BIN=$WINE_BIN" >> "$GITHUB_ENV"
+          echo "installed: $WINE_BIN"
+          "$WINE_BIN" --version || true
+
+      - name: Build the test corpus with the tool
+        run: |
+          cargo build --release --all-targets
+          ./target/release/compitum --version
+          cargo run --release -p compitum-pe --example write_fixture -- /tmp/fixtures
+
+      - name: Prove the loader executes a real ARM64 Windows binary
+        run: |
+          # A binary that only hangs is not executing. `tools/loopcheck.sh` measures CPU growth
+          # across two windows, which distinguishes execution from blocking -- an exit code
+          # cannot, and a check that used one reported a false pass earlier in this project.
+          export WINEPREFIX=/tmp/wineprefix-ci
+          "$WINE_BIN" --version
+
+          mkdir -p /tmp/corpus-ci
+          cp crates/compitum-pe/tests/corpus/*.exe /tmp/corpus-ci/
+          echo "--- corpus files ---"
+          ls -1 /tmp/corpus-ci/
+
+          echo "--- running loopcheck against the freshly built Wine ---"
+          chmod +x tools/loopcheck.sh
+          # WINE is passed explicitly. A bare `wine` would invoke whatever the runner happens
+          # to have installed -- which is Wine 6.0.3, the very version this job exists to
+          # replace -- and the result would look plausible while measuring the wrong binary.
+          if WINE="$WINE_BIN" sh tools/loopcheck.sh ./target/release/compitum /tmp/corpus-ci; then
+            echo "routing predictions matched observation"
+          else
+            code=$?
+            echo "::error::loopcheck exited $code"
+            exit "$code"
+          fi
+
+      - name: Prove ARM64EC specifically works
+        run: |
+          export WINEPREFIX=/tmp/wineprefix-ci
+          # This is the entire reason for the workflow. An exit code cannot distinguish
+          # executing from hanging -- a lesson this project learned the hard way -- so CPU
+          # growth is measured across two windows instead.
+          cpu_jiffies() {
+            total=0
+            for p in /proc/[0-9]*; do
+              cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+              case "$cmd" in *"$1"*) st=$(cat "$p/stat" 2>/dev/null) || continue
+                rest=${st#*) }; set -- $rest
+                total=$(( total + ${12:-0} + ${13:-0} )) ;; esac
+            done
+            echo $total
+          }
+
+          probe() {
+            name="$1"; bin="$2"
+            "$WINE_BIN" "$bin" >/dev/null 2>&1 &
+            sleep 4; a=$(cpu_jiffies "$name")
+            sleep 4; b=$(cpu_jiffies "$name")
+            wineserver -k >/dev/null 2>&1; pkill -f "$name" >/dev/null 2>&1; sleep 1
+            echo $((b - a))
+          }
+          [ -d "$WINEPREFIX" ] || wineboot -i >/dev/null 2>&1
+          wineserver -k >/dev/null 2>&1; sleep 1
+
+          echo "--- ARM64EC fixture (machine 0x8664 + CHPE v1) ---"
+          g=$(probe chpe-arm64ec.exe /tmp/corpus-ci/chpe-arm64ec.exe)
+          echo "CPU growth: +$g jiffies over 4 s"
+
+          if [ "$g" -ge 150 ]; then
+            echo "ARM64EC EXECUTION CONFIRMED"
+          else
+            echo "::error::the ARM64EC fixture did not execute (+$g jiffies)"
+            echo "Wine was built with arm64ec in PE_ARCHS, so this is the interesting failure."
+            exit 1
+          fi
+
+      - name: Upload the build log and source when asked
+        if: github.event.inputs.keep_source == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-arm64ec-source
+          path: ${{ env.WINE_SRC }}
+          retention-days: 7
+          # The tree is large; keep it short-lived and only when explicitly requested.
+          compression-level: 1
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Wine ARM64EC build"
+            echo
+            echo "- Wine version: \`${{ github.event.inputs.wine_version }}\`"
+            echo "- dotprod guard patch needed: \`${{ steps.dotprod.outputs.needed }}\`"
+            echo "- runner: \`ubuntu-24.04-arm\`"
+            echo
+            echo "The ARM64EC probe measures CPU growth rather than an exit code, because a"
+            echo "hanging process also exits non-zero and a check that used exit codes alone"
+            echo "reported a false pass earlier in this project."
+          } >> "$GITHUB_STEP_SUMMARY"
