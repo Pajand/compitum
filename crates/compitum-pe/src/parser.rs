@@ -390,13 +390,75 @@ pub struct PeImage {
     pub imports: Vec<ImportedModule>,
     /// Total number of imported symbols across all modules.
     pub import_symbol_total: usize,
+    /// CHPE hybrid metadata, when the image carries any.
+    ///
+    /// **This is what identifies a hybrid image.** A linked ARM64EC executable reports
+    /// machine type `0x8664`, which is indistinguishable from plain x86-64 without reading
+    /// this metadata; `0xA641` is an internal MSVC object-file identifier and is not a valid
+    /// final PE machine type. See [`crate::chpe`] for the evidence.
+    pub hybrid: Option<crate::chpe::HybridMetadata>,
+    /// Set when the image declared a load configuration whose CHPE pointer could not be read.
+    ///
+    /// Kept separately from `hybrid` because the two mean different things: `hybrid: None`
+    /// with `hybrid_error: None` is "definitely not hybrid", whereas an error here is "could
+    /// not tell". Conflating them would let an unreadable pointer be mistaken for evidence of
+    /// a pure image, which is the optimistic direction and therefore the dangerous one.
+    pub hybrid_error: Option<String>,
 }
 
 impl PeImage {
     /// The ABI family of this image.
     #[must_use]
     pub fn family(&self) -> AbiFamily {
-        self.coff.machine.family()
+        // The machine field is authoritative for every architecture except the two where
+        // CHPE metadata can change the answer.
+        //
+        // ARM64 and AMD64 are the only machine types a hybrid image can carry, because those
+        // are the two ABIs ARM64EC and ARM64X combine. For everything else -- I386, Itanium,
+        // RISC-V, LoongArch, PowerPC, or an unrecognized value -- the machine field already
+        // says what the image is, and consulting the hybrid classification would only lose
+        // information.
+        //
+        // An earlier revision of this method routed *every* machine through the hybrid
+        // classifier, which knows three outcomes and therefore collapsed six distinct
+        // architectures into x86-64. Three router tests caught it: a 32-bit x86 image routed
+        // to Box64 instead of WOW64, and an Itanium image became translatable instead of
+        // unsupported. The machine field is consulted first for exactly that reason.
+        let raw = self.coff.machine.raw();
+        if !matches!(raw, 0xAA64 | 0x8664 | 0xA641 | 0xA64E) {
+            return self.coff.machine.family();
+        }
+
+        // The conservative direction matters here: when the metadata is absent or unreadable,
+        // an x86-64 machine type stays x86-64. That over-translates, which costs performance,
+        // rather than promising native execution that would fault.
+        match crate::chpe::classify_image(self, self.hybrid.as_ref()) {
+            crate::chpe::Classified::PureArm64 => AbiFamily::Arm64Native,
+            crate::chpe::Classified::PureX86_64 => AbiFamily::X86_64,
+            crate::chpe::Classified::Hybrid(crate::chpe::HybridKind::Arm64Ec) => {
+                AbiFamily::Arm64Hybrid
+            }
+            crate::chpe::Classified::Hybrid(crate::chpe::HybridKind::Arm64X) => AbiFamily::Arm64Fat,
+            crate::chpe::Classified::Hybrid(crate::chpe::HybridKind::Unrecognized { .. }) => {
+                AbiFamily::Arm64Hybrid
+            }
+        }
+    }
+
+    /// Returns `true` when the image carries CHPE hybrid metadata.
+    ///
+    /// Distinct from [`PeImage::family`], which folds the metadata into a routing decision.
+    /// This reports the raw evidence.
+    #[must_use]
+    pub fn is_hybrid(&self) -> bool {
+        self.hybrid.is_some()
+    }
+
+    /// Returns `true` when the image declared a load configuration whose CHPE pointer could
+    /// not be read, so the classification is genuinely unknown rather than known-pure.
+    #[must_use]
+    pub fn has_unresolved_hybrid_metadata(&self) -> bool {
+        self.hybrid_error.is_some()
     }
 
     /// The subsystem, defaulting to unknown when there is no optional header.
@@ -576,9 +638,21 @@ pub fn parse(data: &[u8]) -> Result<PeImage> {
         sections,
         imports: Vec::new(),
         import_symbol_total: 0,
+        hybrid: None,
+        hybrid_error: None,
     };
     image.imports = parse_imports(data, &image);
     image.import_symbol_total = image.imports.iter().map(|m| m.symbol_count).sum();
+
+    // Read the hybrid metadata last, because reaching it requires the section table that was
+    // just parsed. An error here is recorded rather than returned: the image is still fully
+    // classified as a non-hybrid file, and discarding that classification because a pointer
+    // in an optional structure was unreadable would lose usable information.
+    match crate::chpe::read_hybrid_metadata(data, &image) {
+        Ok(metadata) => image.hybrid = metadata,
+        Err(reason) => image.hybrid_error = Some(reason),
+    }
+
     Ok(image)
 }
 

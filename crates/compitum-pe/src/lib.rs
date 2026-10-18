@@ -51,6 +51,7 @@
 // wrong example on a crate page is worse than no example at all.
 #![doc = include_str!("../README.md")]
 
+pub mod chpe;
 pub mod error;
 pub mod fixture;
 pub mod machine;
@@ -58,6 +59,10 @@ pub mod parser;
 pub mod reader;
 pub mod scanner;
 
+pub use chpe::{
+    classify_image, read_hybrid_metadata, Classified, HybridKind, HybridMetadata,
+    MIN_LOAD_CONFIG_FOR_CHPE,
+};
 pub use error::{PeError, Result};
 pub use machine::{AbiFamily, Machine};
 pub use parser::{

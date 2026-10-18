@@ -55,9 +55,20 @@ impl Machine {
     pub const ARMNT: Machine = Machine(0x01C4);
     /// `IMAGE_FILE_MACHINE_ARM64` — pure 64-bit ARM (AArch64).
     pub const ARM64: Machine = Machine(0xAA64);
-    /// `IMAGE_FILE_MACHINE_ARM64EC` — hybrid AArch64 + x86-64.
+    /// The MSVC **object-file** identifier for ARM64EC: `0xA641`.
+    ///
+    /// This is **not** a valid final PE machine type and is not defined in `winnt.h`.
+    /// Microsoft's documentation states it "is an internal MSVC identifier used for Arm64EC
+    /// object files", and that "only the linked EXE or DLL carries the `8664 (x64) (ARM64X)`
+    /// or `AA64 (ARM64) (ARM64X)` machine value".
+    ///
+    /// A linked ARM64EC executable therefore reports [`Machine::AMD64`], and is distinguished
+    /// from plain x86-64 only by its CHPE metadata. See [`crate::chpe`].
     pub const ARM64EC: Machine = Machine(0xA641);
-    /// `IMAGE_FILE_MACHINE_ARM64X` — fat binary with both ARM64 and ARM64EC slices.
+    /// The MSVC **object-file** identifier for ARM64X: `0xA64E`.
+    ///
+    /// Like [`Machine::ARM64EC`], this appears in toolchain output rather than in a linked
+    /// image. A real ARM64X executable carries [`Machine::ARM64`] plus CHPE metadata.
     pub const ARM64X: Machine = Machine(0xA64E);
     /// `IMAGE_FILE_MACHINE_CHPE_X86` — Compiled Hybrid Portable Executable.
     pub const CHPE_X86: Machine = Machine(0x3A64);

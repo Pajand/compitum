@@ -374,3 +374,112 @@ fn arm64ec_executable_reports_amd64_as_its_machine_type() {
          the section table"
     );
 }
+
+// ===========================================================================
+// The machine field must stay authoritative outside the hybrid-capable values.
+// ===========================================================================
+
+/// Six distinct architectures must not collapse into one.
+///
+/// This guards a regression I introduced while adding hybrid detection: `family()` began
+/// routing *every* machine value through the CHPE classifier, which knows only three
+/// outcomes. As a result I386, Itanium, RISC-V, LoongArch, PowerPC and an unrecognized value
+/// all reported as x86-64. Three router tests caught it — a 32-bit x86 image routed to Box64
+/// instead of WOW64, and an Itanium image became translatable instead of unsupported.
+///
+/// The fix was to consult the CHPE metadata only for the four machine values a hybrid image
+/// can carry, letting the machine field answer for everything else. This test pins that,
+/// because the same mistake is easy to make again: the hybrid classifier is the newer and
+/// more interesting code path, and it is tempting to route everything through it.
+#[test]
+fn every_architecture_is_reported_distinctly() {
+    use compitum_pe::fixture::{subsystem, synthetic};
+
+    // (machine value, expected family id) -- from the PE specification.
+    let cases: [(u16, &str); 8] = [
+        (0xAA64, "arm64"),
+        (0x8664, "x86_64"),
+        (0x014C, "x86"),
+        (0x01C4, "arm32"),
+        (0x0200, "ia64"),
+        (0x5064, "riscv"),
+        (0x6264, "loongarch"),
+        (0x01F0, "powerpc"),
+    ];
+
+    for (raw, expected) in cases {
+        let image = parse(&synthetic(raw, subsystem::CONSOLE, false))
+            .unwrap_or_else(|e| panic!("machine 0x{raw:04X} failed to parse: {e}"));
+        assert_eq!(
+            image.family().id(),
+            expected,
+            "machine 0x{raw:04X} must report `{expected}`; collapsing architectures together \
+             would route them to the wrong backend"
+        );
+    }
+}
+
+/// An unrecognized machine value must not be presented as a known architecture.
+#[test]
+fn an_unrecognized_machine_stays_unrecognized() {
+    use compitum_pe::fixture::{subsystem, synthetic};
+
+    let image = parse(&synthetic(0x1234, subsystem::CONSOLE, false)).expect("parses");
+    assert_eq!(
+        image.family().id(),
+        "other",
+        "an unknown machine value must be reported as unknown rather than guessed at"
+    );
+    assert!(!image.family().is_fully_native_on_arm64());
+    assert!(!image.family().needs_full_translation());
+}
+
+/// A machine value of zero is not a valid image type.
+#[test]
+fn a_zero_machine_is_reported_as_unknown() {
+    use compitum_pe::fixture::{subsystem, synthetic};
+
+    let image = parse(&synthetic(0x0000, subsystem::CONSOLE, false)).expect("parses");
+    assert_eq!(image.family().id(), "unknown");
+}
+
+/// The four hybrid-capable machine values are exactly the ones the classifier is consulted for.
+///
+/// Recorded as a test so the set cannot grow by accident: adding a value here without adding
+/// CHPE metadata handling would silently route an architecture through a classifier that does
+/// not understand it.
+#[test]
+fn only_four_machine_values_consult_the_hybrid_classifier() {
+    use compitum_pe::fixture::{machine, subsystem, synthetic};
+
+    // ARM64 and AMD64 are the two ABIs ARM64EC and ARM64X combine, plus their two object-file
+    // identifiers. Nothing else can carry CHPE metadata.
+    let hybrid_capable = [0xAA64u16, 0x8664, 0xA641, 0xA64E];
+
+    for raw in hybrid_capable {
+        assert!(
+            compitum_pe::Machine(raw).is_arm64_flavour()
+                || raw == 0x8664
+                || raw == 0xA641
+                || raw == 0xA64E
+        );
+    }
+
+    // Everyone else keeps the answer the machine field alone gives.
+    for raw in [0x014Cu16, 0x0200, 0x5064, 0x6264, 0x01F0, 0x01C4] {
+        let image = parse(&synthetic(raw, subsystem::CONSOLE, false)).expect("parses");
+        assert!(
+            !image.is_hybrid(),
+            "machine 0x{raw:04X} cannot carry CHPE metadata"
+        );
+        assert_eq!(
+            image.family(),
+            compitum_pe::Machine(raw).family(),
+            "machine 0x{raw:04X} must be answered by the machine field alone"
+        );
+    }
+
+    // And the ARM64 case still works end to end.
+    let arm64 = parse(&synthetic(machine::ARM64, subsystem::CONSOLE, false)).expect("parses");
+    assert_eq!(arm64.family().id(), "arm64");
+}
