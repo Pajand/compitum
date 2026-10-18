@@ -418,6 +418,56 @@ quietly reduce coverage.
 **Test coverage at this revision:** 365 tests (up from 360), of which 26 run against real
 toolchain output or independently-validated fixtures. CI green on ARM64 and x86_64.
 
+**2026-10-18 — Phase 1 feasibility measured, not assumed**
+
+The roadmap feared Phase 1 because the plan called for building `proton-wine` from source: a
+gigabyte of C plus twenty dependencies, on a device whose Android host kills large builds and
+whose musl libc is not Wine's target. Before spending hours on that, the cheapest possible
+test was run instead.
+
+> Is Wine already present, and can it execute a real ARM64 Windows PE binary?
+
+It can. **The first Phase 1 milestone is met on the development device, with software already
+installed.**
+
+Measured, with controls that separate correctly:
+
+| Input | Expected | Observed | Meaning |
+|---|---|---|---|
+| not a PE | rejected fast | exit 47 | Wine refuses non-PE input |
+| ARMNT `0x01C4` | rejected | exit 32 | no 32-bit ARM support in 6.0.3 |
+| `real-console-4k.exe` (`0xAA64`) | runs to timeout | **exit 124** | executed |
+| `real-gui-4k.exe` (`0xAA64`) | runs to timeout | **exit 124** | executed |
+| `chpe-arm64ec.exe` (`0x8664` + CHPE v1) | refused | exit 123 | correct: too old, see below |
+| `chpe-arm64x.exe` (`0xAA64` + CHPE v2) | refused | exit 5 | fixture artefact; its entry RVA is zero |
+
+Exit 124 is a timeout, and a loader that rejects a file fails fast. The `real-console-4k.exe`
+binary's `entry()` is an infinite loop making no NT calls, so "still running" is precisely the
+correct outcome — and the ARMNT row proves Wine is not accepting everything indiscriminately.
+
+Proof that the code was *executed* rather than merely loaded came from CPU time read directly
+from the kernel: **657 jiffies = 6.6 CPU-seconds in an 8-second window.** A blocked loader would
+have accumulated almost none.
+
+**Why ARM64EC does not work, and why that is expected.** Wine 8.21 (October 2023) introduced
+"beginnings of support for ARM64EC". The installed version is 6.0.3, predating it by more than
+two years, and `wine64-development` in this archive also resolves to 6.0. The refusal is a
+dated version floor, not an open research problem — a far better shape of difficulty.
+
+**What this changes.** The bridge is proven for native ARM64 with no build at all. `proton-wine`
+remains the right answer, but for the **hybrid case only**, which is a narrower task than the
+roadmap originally planned for. Full measurements and reproduction steps are in
+`docs/PHASE1-FEASIBILITY.md`.
+
+### Revised Phase 1
+
+| # | Task | Status |
+|---|---|---|
+| 1.1 | Native ARM64 execution under Wine | ✅ **met** — measured, documented |
+| 1.2 | ARM64EC hybrid execution | ⬜ needs Wine ≥ 8.21, or a `proton-wine` build |
+| 1.3 | NT syscall translation beyond startup | ⬜ untested; needs a binary that makes calls |
+| 1.4 | End-to-end `NATIVE` proof from the CLI | ⬜ the router already decides it; execution now follows |
+
 ---
 
 ## 7. DECISION LOG
