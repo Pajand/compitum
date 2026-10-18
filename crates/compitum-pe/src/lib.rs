@@ -46,6 +46,10 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// The crate README is included as documentation, which makes every Rust example in it a
+// compiled doctest. An example that is not compiled is an example that silently rots, and a
+// wrong example on a crate page is worse than no example at all.
+#![doc = include_str!("../README.md")]
 
 pub mod error;
 pub mod fixture;

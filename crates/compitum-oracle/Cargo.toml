@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+readme = "README.md"
+keywords = ["arm64", "compatibility", "registry", "jsonl", "database"]
+categories = ["development-tools", "database"]
+
 [dependencies]
 compitum-json = { workspace = true }
 compitum-digest = { workspace = true }

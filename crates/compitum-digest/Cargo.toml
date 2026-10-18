@@ -8,4 +8,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+readme = "README.md"
+keywords = ["sha256", "hash", "checksum", "no-dependencies", "no-std"]
+categories = ["cryptography", "algorithms"]
+
 [dependencies]

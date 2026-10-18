@@ -24,6 +24,13 @@
 //! including the padding edge cases at 55, 56, 63 and 64 bytes where the length field
 //! forces an extra block.
 
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+// The crate README is included as documentation, which makes every Rust example in it a
+// compiled doctest. An example that is not compiled is an example that silently rots, and a
+// wrong example on a crate page is worse than no example at all.
+#![doc = include_str!("../README.md")]
+
 /// The digest length in bytes.
 pub const DIGEST_LEN: usize = 32;
 

@@ -1,12 +1,15 @@
 [package]
 name = "compitum-cli"
-description = "Command-line interface for COMPITUM."
+description = "Command-line interface for COMPITUM, the ABI-aware ARM64 compatibility layer."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+keywords = ["arm64", "arm64ec", "compatibility", "cli", "windows-on-arm"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "compitum"

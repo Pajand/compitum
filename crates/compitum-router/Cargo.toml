@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+readme = "README.md"
+keywords = ["arm64", "arm64ec", "abi", "compatibility", "windows-on-arm"]
+categories = ["development-tools", "os"]
+
 [dependencies]
 compitum-json = { workspace = true }
 compitum-isa = { workspace = true }

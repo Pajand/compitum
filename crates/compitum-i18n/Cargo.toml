@@ -8,5 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+readme = "README.md"
+keywords = ["i18n", "localization", "translations", "locale", "l10n"]
+categories = ["internationalization", "localization"]
+
 [dependencies]
 compitum-json = { workspace = true }

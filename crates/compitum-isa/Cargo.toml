@@ -8,5 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+readme = "README.md"
+keywords = ["arm64", "aarch64", "cpu-features", "hwcap", "hardware"]
+categories = ["hardware-support", "os", "no-std"]
+
 [dependencies]
 compitum-json = { workspace = true }

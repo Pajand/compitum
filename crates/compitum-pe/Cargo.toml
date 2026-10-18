@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+readme = "README.md"
+keywords = ["pe", "coff", "executable", "arm64", "binary-analysis"]
+categories = ["parser-implementations", "parsing", "os::windows-apis"]
+
 [dependencies]
 compitum-json = { workspace = true }
 compitum-isa = { workspace = true }
