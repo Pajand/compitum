@@ -366,6 +366,58 @@ it.
 zero build warnings, zero clippy diagnostics, zero third-party dependencies, CI green on
 ARM64 and x86_64.
 
+**2026-10-18 — The CHPE detection is validated by an independent reader**
+
+Correcting the hybrid classification was not enough. The new code was tested only by fixtures
+this repository built, which is exactly the pattern that had just failed twice: a fixture
+sharing an assumption with the code under test cannot detect that assumption being wrong.
+Building the detector correctly and *proving* it correct are different obligations.
+
+`lld-link` cannot close the gap on its own. It will link an ARM64X image, but without a Windows
+CRT to supply the `__arm64x_*` symbols it leaves the load configuration empty, so no CHPE
+metadata is emitted. That is a toolchain limitation, not an unsupported format, so the metadata
+had to be written by hand.
+
+What makes a hand-written fixture evidence rather than assertion is `llvm-readobj`: an
+independent implementation of the same format that knows nothing about this code. It rejected
+the first attempt outright:
+
+```
+error: RVA 0x3000 for CHPE code map not found
+```
+
+which is precisely the feedback that turns a guess into a verified layout. Once corrected it
+reports:
+
+```
+chpe-arm64ec.exe  ->  Format: COFF-ARM64EC   Version: 0x1
+chpe-arm64x.exe   ->  Format: COFF-ARM64X    Version: 0x2
+```
+
+and this crate's reader agrees on both, and on a plain ARM64 file, and on the linker-produced
+ARM64EC file. **Two independent implementations reaching the same conclusion from the same
+bytes is the strongest evidence the project has.**
+
+The generator now records the *independent* verdict in the manifest as `llvm_readobj_format`,
+and the test asserts our classification matches it. The manifest holds what a third party saw,
+not what we intended, so a disagreement fails the build instead of being smoothed over.
+
+| Corpus entry | Origin | Independent verdict |
+|---|---|---|
+| `real-console-4k.exe` | clang + lld-link | — (machine field suffices) |
+| `real-gui-4k.exe` | clang + lld-link | — |
+| `real-console-16k.exe` | clang + lld-link | — |
+| `real-arm64ec.exe` | clang + lld-link | machine `0x8664`, which is the finding |
+| `chpe-arm64ec.exe` | constructed, layout verified | `COFF-ARM64EC`, version 1 |
+| `chpe-arm64x.exe` | constructed, layout verified | `COFF-ARM64X`, version 2 |
+
+One test derived its expectation from the linker-produced list alone and therefore silently
+skipped the new files. Both counts now derive from the full corpus, so adding a fixture cannot
+quietly reduce coverage.
+
+**Test coverage at this revision:** 365 tests (up from 360), of which 26 run against real
+toolchain output or independently-validated fixtures. CI green on ARM64 and x86_64.
+
 ---
 
 ## 7. DECISION LOG
