@@ -303,6 +303,39 @@ Also added `tools/publish_order.py`, which derives the publication order from th
 dependency graph. The order is load-bearing: a rejected publish permanently consumes the
 version number, so it must be right the first time.
 
+**2026-10-18 — The name is claimed in every namespace that matters**
+
+The project's identity is no longer provisional. Measured, not assumed:
+
+| Namespace | Value | Verified |
+|---|---|---|
+| crates.io | 8 crates at `0.1.0` | every one's `repository` field checked to point at the org |
+| npm | `compitum@0.0.3` | `latest`, metadata corrected twice to reach the org URL |
+| PyPI | `compitum 0.1.0` | wheel and sdist |
+| GitHub org | `compitum-dev` | ownership transferred, redirect active |
+| Container | `ghcr.io/compitum-dev/compitum` | automatic, inherits the org |
+
+`cargo install compitum-cli` was verified to resolve, so the command the crate's own README
+advertises actually works. That is worth checking rather than assuming: the README made the
+claim before anything was published.
+
+**Three obstacles, and two were mine.** Worth recording in that proportion, because the
+pattern has held all the way through this project.
+
+1. crates.io requires a verified email address. The first publish authenticated successfully
+   and was refused for that reason alone; the credential was never the problem.
+
+2. crates.io rate-limits new crates — `429` with an explicit retry time. Six published, then
+   a pause was required. A deliberate anti-abuse limit.
+
+3. **My own publish script misread a success as a failure.** It matched `"already exists"` and
+   `"previously published"`, while crates.io words that case as "crate version `0.1.0` is already uploaded". The sequence aborted after the first crate because of it.
+
+Obstacle 3 has the same shape as every other defect found here: a check reporting something
+other than what actually happened. The lesson is to match the observed wording rather than the
+assumed wording — which is the same rule that produced the PE offset correction, the CHPE
+identification, and the three scanner rules that could never fire.
+
 **Phase 0 is complete.** Six implemented crates, 312 tests, zero build warnings, zero
 third-party dependencies, and a gate that runs on ARM64 and on x86_64.
 
