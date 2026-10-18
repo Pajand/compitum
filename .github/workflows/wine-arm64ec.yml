@@ -39,7 +39,7 @@ on:
       wine_version:
         description: "Wine version to build, e.g. 11.20"
         required: false
-        default: "11.20"
+        default: "10.0"
       keep_source:
         description: "Upload the source tree and build log as artifacts"
         type: boolean
@@ -126,8 +126,19 @@ jobs:
           # Optional subsystems are off because this build exists to prove ARM64EC execution,
           # not to provide media codecs. Each one is a dependency that can fail the build for a
           # reason unrelated to what is being tested.
+          # TWO architectures, not four. `x86_64` and `i386` were included in an earlier
+          # revision and roughly doubled the compile time for no benefit: proving ARM64EC
+          # *execution* needs the aarch64 and arm64ec DLLs, and Wine's own documentation
+          # gives exactly this pair as the ARM64X build recipe:
+          #
+          #   "All of Wine can be built as ARM64X by passing
+          #    --enable-archs=arm64ec,aarch64"
+          #
+          # Wine 10.0, the stable release, states: "the ARM64EC architecture is fully
+          # supported, with feature parity with the ARM64 support." An earlier revision
+          # built 11.20, the development branch, for no stated reason.
           ./configure \
-            --enable-archs=aarch64,arm64ec,x86_64,i386 \
+            --enable-archs=aarch64,arm64ec \
             --without-ffmpeg --without-gstreamer \
             --without-x --without-freetype --without-fontconfig --without-cups \
             --without-alsa --without-pulse --without-gnutls --without-vulkan \
