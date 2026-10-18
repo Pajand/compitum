@@ -201,15 +201,17 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Every crate must be packageable
+      - name: Verify every crate is publishable, in the right order
         run: |
-          # `cargo package` performs the same validation a registry does, so a failure here
-          # is far cheaper than a rejected publish.
-          for crate in compitum-json compitum-digest compitum-i18n compitum-isa \
-                       compitum-pe compitum-router compitum-oracle compitum-cli; do
-            echo "--- $crate"
-            cargo package -p "$crate" --no-verify --allow-dirty
-          done
+          # `cargo package` resolves dependencies against the registry, not the workspace, so
+          # a member of a fresh crate family legitimately cannot be packaged until its own
+          # dependencies are published. The script separates that expected state from a real
+          # defect, because a gate that fails on a healthy repository teaches people to
+          # ignore it.
+          python3 .github/scripts/check_packaging.py
+
+      - name: Show the publish order this repository implies
+        run: python3 tools/publish_order.py --run-cargo
 
       - name: No credential-shaped strings in the tree
         run: python3 .github/scripts/check_secrets.py .
