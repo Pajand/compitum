@@ -32,7 +32,7 @@ You do not need permission for any of the following:
   proper adjective for the software.
 - Make it obvious that your fork or product is **not** the official project when it
   differs from it. A sentence is enough: *"This is an unofficial fork; the original is
-  at github.com/Pajand/compitum."*
+  at github.com/compitum-dev/compitum."*
 - Keep the name spelled in capitals: **COMPITUM**.
 
 ### Do not
@@ -60,7 +60,7 @@ users:
 | Package | `compitum` on crates.io |
 | Package | `compitum` on npm |
 | Package | `compitum` on PyPI |
-| Repository | `github.com/Pajand/compitum` |
+| Repository | `github.com/compitum-dev/compitum` |
 | Domain | `compitum.dev` (primary) |
 
 The project does **not** claim every use of the word. A restaurant, a bridge-management

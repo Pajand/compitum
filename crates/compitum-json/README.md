@@ -3,7 +3,7 @@
 A minimal, dependency-free JSON implementation: value type, strict RFC 8259 parser, and a
 deterministic serializer.
 
-Part of [COMPITUM](https://github.com/Pajand/compitum), an ABI-aware ARM64 compatibility layer.
+Part of [COMPITUM](https://github.com/compitum-dev/compitum), an ABI-aware ARM64 compatibility layer.
 This crate has no dependencies and no knowledge of ARM64; it exists because the project's
 doctrine forbids third-party crates in the core, and JSON is needed for the compatibility
 ledger.

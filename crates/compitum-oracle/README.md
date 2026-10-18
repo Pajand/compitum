@@ -1,6 +1,6 @@
 # compitum-oracle
 
-The compatibility ledger: layer 4 of [COMPITUM](https://github.com/Pajand/compitum), and the
+The compatibility ledger: layer 4 of [COMPITUM](https://github.com/compitum-dev/compitum), and the
 project's durable asset.
 
 ## What this crate is for

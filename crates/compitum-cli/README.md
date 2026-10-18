@@ -1,6 +1,6 @@
 # compitum
 
-The command-line interface for [COMPITUM](https://github.com/Pajand/compitum), the universal
+The command-line interface for [COMPITUM](https://github.com/compitum-dev/compitum), the universal
 ARM64 compatibility layer.
 
 ## Install

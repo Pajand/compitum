@@ -171,7 +171,7 @@ Irreversibility decreases downward; do them in this order.
 
 ### Why the organisation, not your user account
 
-The repository currently lives at `Pajand/compitum`. That works, but it makes the project
+The repository currently lives at `compitum-dev/compitum`. That works, but it makes the project
 identity depend on a personal account. An organisation:
 
 - survives losing access to a personal account,

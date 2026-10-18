@@ -79,7 +79,14 @@ const CORPUS_FILES: [&str; 4] = [
 /// That independent verdict is what makes these evidence rather than assertion. If an offset
 /// were wrong, llvm-readobj would report an error rather than a format name, which is exactly
 /// what happened during development when the code-map RVA did not resolve.
-const CHPE_FILES: [&str; 2] = ["chpe-arm64ec.exe", "chpe-arm64x.exe"];
+const CHPE_FILES: [&str; 3] = [
+    "chpe-arm64ec.exe",
+    // The complementary case: ARM64EC metadata with x86-64 code. Documented separately
+    // because it is a limitation rather than a capability -- Wine bundles no x86-64
+    // emulator, so no Wine build can execute it without FEX.
+    "chpe-arm64ec-x64code.exe",
+    "chpe-arm64x.exe",
+];
 
 // ===========================================================================
 // The regression this file was written for.

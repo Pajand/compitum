@@ -1,6 +1,6 @@
 # compitum-router
 
-The ABI routing engine: layer 3 of [COMPITUM](https://github.com/Pajand/compitum), and the
+The ABI routing engine: layer 3 of [COMPITUM](https://github.com/compitum-dev/compitum), and the
 decision the product exists to make.
 
 ## The question

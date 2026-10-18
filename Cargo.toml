@@ -16,8 +16,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/Pajand/compitum"
-homepage = "https://github.com/Pajand/compitum"
+repository = "https://github.com/compitum-dev/compitum"
+homepage = "https://github.com/compitum-dev/compitum"
 authors = ["The COMPITUM Project"]
 description = "ABI-aware ARM64 compatibility layer: classify, verify, route."
 

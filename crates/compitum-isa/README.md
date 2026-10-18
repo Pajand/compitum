@@ -3,7 +3,7 @@
 The ARM64 instruction-set vocabulary, and an oracle that reports what *this* machine can
 actually execute.
 
-Part of [COMPITUM](https://github.com/Pajand/compitum), an ABI-aware ARM64 compatibility layer.
+Part of [COMPITUM](https://github.com/compitum-dev/compitum), an ABI-aware ARM64 compatibility layer.
 
 ## The problem this solves
 

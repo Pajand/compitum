@@ -391,16 +391,30 @@ def main() -> int:
         )
 
     chpe_cases = [
-        # (filename, machine, CHPE version, code-map types, expected llvm format)
+        # (filename, machine, CHPE version, code-map types, expected llvm format, entry code)
         #
         # ARM64EC: an x86-64 machine type plus version-1 metadata. This is the case machine
         # type alone cannot identify, because the header is identical to plain x86-64.
-        # x86-64 `jmp $`: an infinite loop in the instruction set this machine field
-        # declares. Wine on ARM64 cannot run x86-64 without FEX, so a refusal is the correct
-        # outcome and confirms the `fex_partial` prediction rather than contradicting it.
-        ("chpe-arm64ec.exe", 0x8664, 1, [0, 0, 1], "COFF-ARM64EC", b"\xEB\xFE"),
-        # ARM64 `b .`: an infinite loop in ARM64, matching this machine field. Wine executes
-        # it natively, which is what the `pick_native_slice` prediction claims.
+        #
+        # The entry code is ARM64 `b .`, NOT x86-64, and that choice is the whole point.
+        # ARM64EC is an ABI in which ARM64 code is the norm and x86-64 interop is the exception.
+        # A file containing only ARM64 code while carrying the ARM64EC machine type is entirely
+        # legitimate, and it is what isolates the Wine VERSION as the variable:
+        #
+        #   Wine 6.0.3  refuses it (predates ARM64EC)      <- measured: exit 123
+        #   Wine 10.0+  executes the ARM64 loop            <- the proof
+        #
+        # An earlier revision put x86-64 `jmp $` here, reasoning that the code ought to match
+        # the machine field. That reasoning was wrong for this purpose: Wine ships no x86-64
+        # emulator, so NO Wine build whatsoever could execute it and the test could never pass.
+        ("chpe-arm64ec.exe", 0x8664, 1, [0, 0, 1], "COFF-ARM64EC", b"\x00\x00\x00\x14"),
+        # The complementary case, kept because the distinction matters: ARM64EC metadata with
+        # *x86-64* code. This documents a limitation rather than a capability -- it needs FEX,
+        # which Wine does not bundle, so it is expected NOT to run on a plain Wine.
+        ("chpe-arm64ec-x64code.exe", 0x8664, 1, [0, 0, 1], "COFF-ARM64EC", b"\xEB\xFE"),
+        # ARM64 `b .`: an infinite loop in ARM64. Wine executes this natively, either through
+        # its ARM64X support or by selecting the plain ARM64 slice -- which is what the
+        # `pick_native_slice` prediction claims.
         ("chpe-arm64x.exe", 0xAA64, 2, [0, 1, 0, 1], "COFF-ARM64X", b"\x00\x00\x00\x14"),
     ]
 

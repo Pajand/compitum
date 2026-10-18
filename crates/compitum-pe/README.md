@@ -1,7 +1,7 @@
 # compitum-pe
 
 PE/COFF parsing and ARM64 binary classification: layer 1 of
-[COMPITUM](https://github.com/Pajand/compitum).
+[COMPITUM](https://github.com/compitum-dev/compitum).
 
 ## The problem this solves
 

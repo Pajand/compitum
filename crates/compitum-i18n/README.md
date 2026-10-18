@@ -3,7 +3,7 @@
 A localization engine whose base language is compiled in, and where adding a language means
 dropping a JSON file rather than rebuilding the program.
 
-Part of [COMPITUM](https://github.com/Pajand/compitum).
+Part of [COMPITUM](https://github.com/compitum-dev/compitum).
 
 ## The design contract
 

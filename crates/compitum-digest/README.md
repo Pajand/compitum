@@ -3,7 +3,7 @@
 SHA-256 (FIPS 180-4) with a streaming interface, implemented from the specification with no
 external dependencies.
 
-Part of [COMPITUM](https://github.com/Pajand/compitum). This crate exists to content-address
+Part of [COMPITUM](https://github.com/compitum-dev/compitum). This crate exists to content-address
 binaries in the compatibility ledger: a record must still refer to the same code in five years,
 after every filename and version number has changed.
 
