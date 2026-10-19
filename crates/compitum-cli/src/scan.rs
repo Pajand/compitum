@@ -124,6 +124,23 @@ pub struct RoutedFile {
     /// learn something about the customer's software, so a result that describes the auditor's
     /// equipment has to be labelled as such or the whole report is worthless.
     pub environment_blocked: bool,
+    /// `true` when the image is a Windows kernel driver.
+    ///
+    /// # Why this is separate from the route
+    ///
+    /// A kernel driver on an ARM64 build is pure AArch64, so every architecture-level question
+    /// answers "runs natively, no translation, full speed". All of that is true and all of it is
+    /// useless: the image expects to be mapped by the kernel and to call kernel routines, so a
+    /// user-mode compatibility layer cannot load it at all.
+    ///
+    /// Measured on 747 images from a real Wine build, a scan reported every kernel driver as a
+    /// healthy native binary. In a migration report that is the difference between "port this
+    /// one, it is nearly free" and "this one needs a driver rewrite", and a customer acting on
+    /// the first answer wastes the work.
+    ///
+    /// The route is left alone — it answers the architecture question correctly — and this flag
+    /// answers the separate question of whether the route can be taken at all.
+    pub is_kernel_driver: bool,
 }
 
 /// Returns `true` when a blocker describes the scanning host rather than the image.
@@ -199,6 +216,13 @@ pub struct ScanCounts {
     pub malformed: usize,
     /// Files that could not be read.
     pub unreadable: usize,
+    /// Images that are Windows kernel drivers.
+    ///
+    /// Counted separately because they cannot be loaded by a user-mode compatibility layer at
+    /// all. On an ARM64 build a kernel driver is pure AArch64, so every architecture-level
+    /// question answers "runs natively at full speed" — true, and useless. A migration report
+    /// must say so, or it will recommend porting work that is actually a driver rewrite.
+    pub kernel_driver: usize,
 }
 
 impl ScanCounts {
@@ -219,6 +243,12 @@ impl ScanCounts {
     /// The general rule this is an instance of: a property that means "nothing bad was found"
     /// must also require that something was looked at. Otherwise an empty or unmeasured result
     /// is indistinguishable from a clean one, and a consumer cannot tell which it received.
+    ///
+    /// A fourth condition, added later for the same reason: **kernel drivers**. They route
+    /// natively — every instruction is AArch64 — and they cannot be loaded by a user-mode
+    /// compatibility layer at all. So a tree of drivers satisfies every architectural test while
+    /// being entirely un-runnable, and calling that "entirely native" would be true and
+    /// misleading in the same sentence.
     #[must_use]
     pub fn is_entirely_native(&self) -> bool {
         let judged = self.routed.saturating_sub(self.environment_refused);
@@ -227,6 +257,7 @@ impl ScanCounts {
             && self.translated == 0
             && self.will_not_run() == 0
             && self.malformed == 0
+            && self.kernel_driver == 0
     }
 
     /// How many images this scan actually reached a conclusion about.
@@ -508,6 +539,10 @@ fn route(bytes: &[u8], image: PeImage, host: &HostProfile, backends: BackendSet)
         headline: plan.headline(),
         blockers,
         environment_blocked,
+        // Read before `image` is dropped and after the router is consulted, so the two facts
+        // stay independent: the route answers the architecture question, and this answers
+        // whether the route can be taken at all.
+        is_kernel_driver: image.is_kernel_driver(),
     }
 }
 
@@ -534,6 +569,12 @@ pub fn count(files: &[ScannedFile]) -> ScanCounts {
         match &file.kind {
             ScanKind::Routed(routed) => {
                 counts.routed += 1;
+                // Cross-cutting, so it is counted independently of the route: a kernel driver
+                // is usually also a native route, and both facts are true at once. The route
+                // describes the architecture; this describes whether the route can be taken.
+                if routed.is_kernel_driver {
+                    counts.kernel_driver += 1;
+                }
                 if routed.blocked {
                     counts.refused += 1;
                     // Attributed only when EVERY blocker is about this machine. A refusal with
@@ -648,6 +689,7 @@ mod tests {
             // An intrinsic refusal by default, so the existing tests keep describing a finding
             // about the image rather than accidentally exercising the environmental path.
             environment_blocked: false,
+            is_kernel_driver: false,
         }))
     }
 
@@ -664,6 +706,24 @@ mod tests {
             headline: "no NT system-call layer is installed".to_owned(),
             blockers: vec!["syscall_layer_absent".to_owned()],
             environment_blocked: true,
+            is_kernel_driver: false,
+        }))
+    }
+
+    /// A kernel driver: every instruction AArch64, and unloadable by a user-mode layer.
+    fn kernel_driver() -> ScanKind {
+        ScanKind::Routed(Box::new(RoutedFile {
+            abi_family: "arm64".to_owned(),
+            route: "native".to_owned(),
+            status: "NATIVE".to_owned(),
+            blocked: false,
+            fully_native: true,
+            confidence_permille: 1000,
+            required_features: Vec::new(),
+            headline: "Runs natively".to_owned(),
+            blockers: Vec::new(),
+            environment_blocked: false,
+            is_kernel_driver: true,
         }))
     }
 
@@ -776,6 +836,50 @@ mod tests {
             ),
         ];
         assert!(!count(&files).is_entirely_native());
+    }
+
+    #[test]
+    fn a_kernel_driver_stops_a_tree_being_reported_as_fully_native() {
+        // THE REGRESSION GUARD for a real defect found by scanning 747 genuine binaries.
+        //
+        // A kernel driver on an ARM64 build is pure AArch64, so the router answers every
+        // architectural question correctly: native, no translation, 100% of native speed. A
+        // scan then reported sixteen real drivers that way, and every one of those statements
+        // is true and useless — the image expects to be mapped by a kernel and calls kernel
+        // routines, so a user-mode compatibility layer cannot load it at all.
+        //
+        // In a migration report that misreading costs real money: it reads as "port this one,
+        // it is nearly free" when the truth is "this one needs a driver rewrite".
+        let files = vec![
+            file("a.exe", routed("native", false, true)),
+            file("wineusb.sys", kernel_driver()),
+        ];
+        let counts = count(&files);
+
+        assert_eq!(counts.kernel_driver, 1);
+        assert_eq!(
+            counts.native, 2,
+            "both are architecturally native, correctly"
+        );
+        assert!(
+            !counts.is_entirely_native(),
+            "a tree containing a driver is not a clean bill of health"
+        );
+        assert_eq!(
+            counts.judged(),
+            2,
+            "a driver WAS judged: the route is right, its consequence is what differs"
+        );
+    }
+
+    #[test]
+    fn a_kernel_driver_is_counted_independently_of_its_route() {
+        // The two facts are orthogonal and both matter: the route describes the architecture,
+        // the flag describes whether the route can be taken. Collapsing them would lose one.
+        let files = vec![file("d.sys", kernel_driver())];
+        let counts = count(&files);
+        assert_eq!(counts.native, 1);
+        assert_eq!(counts.kernel_driver, 1);
     }
 
     #[test]

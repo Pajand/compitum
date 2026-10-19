@@ -150,7 +150,11 @@ pub fn render_inspect(
     ));
     out.push_str(&field(
         &translator.text("field.kind"),
-        if image.coff.is_dll() {
+        if image.is_kernel_driver() {
+            // Reported first, because it overrides the DLL/EXE distinction that follows for
+            // every practical purpose: a driver is loaded by the kernel, not by a loader.
+            "kernel driver"
+        } else if image.coff.is_dll() {
             "DLL"
         } else if image.coff.is_object_file() {
             "object file (not linked)"
@@ -259,6 +263,11 @@ pub fn inspect_json(
             image.subsystem().requires_display(),
         )
         .with("is_dll", image.coff.is_dll())
+        // Emitted next to `is_dll` because it overrides it in practice: a kernel driver is
+        // usually also marked as a DLL, and a consumer that only reads `is_dll` will classify a
+        // driver as an ordinary library. Machine-readable output has to carry the distinction
+        // the human report already makes.
+        .with("is_kernel_driver", image.is_kernel_driver())
         .with("is_managed", image.is_managed())
         .with("headless_capable", image.is_headless_capable())
         .with("imports_graphics", image.imports_graphics())
@@ -597,6 +606,22 @@ pub fn render_scan(report: &ScanReport, translator: &Translator, json: bool, all
     if counts.not_pe > 0 {
         out.push_str(&field("not an image", counts.not_pe));
     }
+    if counts.kernel_driver > 0 {
+        out.push_str(&field("kernel driver", counts.kernel_driver));
+    }
+
+    // Given their own section rather than a line in the summary, because the consequence is not
+    // obvious from the numbers: a driver routes natively, so every architectural figure above
+    // says "fine", and none of them says that it cannot be loaded by a user-mode layer at all.
+    if counts.kernel_driver > 0 {
+        out.push_str(&heading("Kernel drivers"));
+        out.push_str(&format!(
+            "  {} image(s) import ntoskrnl.exe, so they run in kernel mode and cannot be\n \
+             \x20 loaded by a user-mode compatibility layer. Their native route is correct and\n \
+             \x20 does not mean they will run here: expect a driver rewrite, not a port.\n",
+            counts.kernel_driver
+        ));
+    }
 
     out.push_str(&heading("Will not run"));
     let intrinsic = counts.will_not_run();
@@ -726,7 +751,17 @@ pub fn render_scan(report: &ScanReport, translator: &Translator, json: bool, all
 /// A one-line description of what happened to a file.
 fn describe(kind: &ScanKind) -> String {
     match kind {
-        ScanKind::Routed(routed) => format!("{}  ({})", routed.status, routed.route),
+        ScanKind::Routed(routed) => {
+            // A driver is named explicitly rather than shown as a bare `NATIVE`, because the
+            // route is the one thing about it that is misleading. A reader scanning this column
+            // for work to schedule must not see a kernel driver described as a clean native
+            // image.
+            if routed.is_kernel_driver {
+                format!("{}  ({})  KERNEL DRIVER", routed.status, routed.route)
+            } else {
+                format!("{}  ({})", routed.status, routed.route)
+            }
+        }
         ScanKind::NotPe => "not-a-windows-image".to_owned(),
         ScanKind::Malformed { message } => format!("unparseable: {message}"),
         ScanKind::Unreadable { message } => format!("unreadable: {message}"),
@@ -760,6 +795,10 @@ pub fn scan_json(report: &ScanReport, all: bool) -> Value {
         .with("not_pe", counts.not_pe)
         .with("malformed", counts.malformed)
         .with("unreadable", counts.unreadable)
+        // Emitted because a consumer reading only the route would conclude a kernel driver is a
+        // clean, cheap port. It routes natively and cannot be loaded by a user-mode layer, so
+        // the machine-readable output has to carry the distinction the human report makes.
+        .with("kernel_driver", counts.kernel_driver)
         // Derived booleans, emitted so a consumer does not have to re-derive the rules and get
         // the empty-tree and all-environmental cases wrong.
         .with("entirely_native", counts.is_entirely_native())
@@ -811,6 +850,9 @@ fn file_json(file: &crate::scan::ScannedFile) -> Value {
             ),
         );
         object.insert("headline", routed.headline.as_str());
+        // Per-file, because a report is read file by file when deciding what to schedule. A
+        // driver listed as a plain native image would be scheduled as a cheap port.
+        object.insert("is_kernel_driver", routed.is_kernel_driver);
     }
 
     match &file.kind {

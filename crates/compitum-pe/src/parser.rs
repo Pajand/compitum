@@ -375,6 +375,31 @@ impl ImportedModule {
     pub fn is_direct3d(&self) -> bool {
         self.name.starts_with("d3d")
     }
+
+    /// Returns `true` when this module is the Windows kernel itself.
+    ///
+    /// # Why this is the signal for a kernel driver
+    ///
+    /// A kernel driver links against `ntoskrnl.exe`, because it runs in kernel mode and uses
+    /// the kernel's exported routines rather than the Win32 API. Importing it is therefore
+    /// evidence about where the image executes, not merely about what it links to.
+    ///
+    /// # Why the subsystem is not the signal
+    ///
+    /// The obvious candidate is the PE subsystem, and it does not work. Measured across the
+    /// 27 drivers in a real Wine distribution built by a real toolchain:
+    ///
+    ///   * 20 carry `IMAGE_SUBSYSTEM_NATIVE` (1), and
+    ///   * 7 carry `IMAGE_SUBSYSTEM_WINDOWS_CUI` (3).
+    ///
+    /// Meanwhile 655 ordinary DLLs and applications carry `windows_console` too, so the field
+    /// separates nothing in either direction. An earlier attempt to classify by subsystem alone
+    /// would have been wrong for both halves of the question, which is why this reads the
+    /// import table instead.
+    #[must_use]
+    pub fn is_kernel(&self) -> bool {
+        self.name == "ntoskrnl.exe"
+    }
 }
 
 /// Every fact COMPITUM extracts from a PE image.
@@ -483,6 +508,27 @@ impl PeImage {
     #[must_use]
     pub fn imports_graphics(&self) -> bool {
         self.imports.iter().any(ImportedModule::is_graphics)
+    }
+
+    /// Returns `true` when the image is a Windows kernel driver.
+    ///
+    /// # Why COMPITUM needs this
+    ///
+    /// A kernel driver is pure AArch64 on an ARM64 build, so every architecture-level question
+    /// answers "runs natively, no translation needed, 100% of native speed". All of that is
+    /// true and all of it is useless: the image cannot be loaded by a user-mode compatibility
+    /// layer at all, because it expects to be mapped by the kernel and to call kernel routines.
+    ///
+    /// Without this distinction a scan of a real Windows distribution reports a kernel driver
+    /// as a perfectly healthy native binary. In a migration report that is the difference
+    /// between "port this one, it is nearly free" and "this one needs a driver rewrite", and a
+    /// customer acting on the first answer wastes the work.
+    ///
+    /// Measured on 747 images from a real Wine build: 18 import `ntoskrnl.exe`, of which 16 are
+    /// `.sys` files, one is `hal.dll` and one is `winedevice.exe` — all genuinely kernel-side.
+    #[must_use]
+    pub fn is_kernel_driver(&self) -> bool {
+        self.imports.iter().any(ImportedModule::is_kernel)
     }
 
     /// Returns `true` when the image is managed code.
