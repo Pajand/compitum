@@ -11,6 +11,8 @@
 //! That split is the whole reason the localization engine can exist without endangering the
 //! Oracle's schema.
 
+use std::fmt::Write as _;
+
 use compitum_i18n::Translator;
 use compitum_isa::HostProfile;
 use compitum_json::{to_pretty, Value};
@@ -18,6 +20,8 @@ use compitum_pe::PeImage;
 use compitum_router::{Plan, Severity};
 
 use crate::scan::{ScanKind, ScanReport};
+
+use compitum_pe::patch::PortVerdict;
 
 /// The width at which a label column is padded in human output.
 const LABEL_WIDTH: usize = 14;
@@ -888,6 +892,83 @@ fn outcome_id(kind: &ScanKind) -> &'static str {
         ScanKind::Malformed { .. } => "malformed",
         ScanKind::Unreadable { .. } => "unreadable",
     }
+}
+
+// ---------------------------------------------------------------------------
+// port
+// ---------------------------------------------------------------------------
+
+/// Renders a port plan for a human reader.
+///
+/// # What this has to communicate, in this order
+///
+/// 1. **Whether anything can be done**, and if not, why not — in terms of what would actually go
+///    wrong, because "unsupported architecture" tells a customer nothing they can act on.
+/// 2. **Exactly which bytes change**, for a dry run. An operator approving an automatic rewrite
+///    of their own binary is entitled to see the diff before it happens.
+/// 3. **That the change is reversible and narrow**, because the whole objection to automatic
+///    porting is that it silently breaks things.
+#[must_use]
+pub fn render_port(
+    path: &str,
+    verdict: &PortVerdict,
+    translator: &Translator,
+    applied: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{} — {path}\n", translator.text("app.name")));
+
+    match verdict {
+        PortVerdict::Safe { edits, rationale } => {
+            out.push_str(&heading("Port available"));
+            out.push_str(&field("change", "metadata only"));
+            out.push_str(&field("edits", edits.len()));
+            out.push_str(&heading("Why this is safe"));
+            out.push_str(&format!("  {rationale}\n"));
+
+            out.push_str(&heading("What would change"));
+            for edit in edits {
+                let _ = writeln!(&mut out, "  {}", edit.describe());
+            }
+            // The hint must match what actually happened. Telling an operator who just ran
+            // `--apply` to run `--apply` reads as though the command ignored them, which is the
+            // worst impression an automatic patcher can give.
+            match applied {
+                Some(destination) => {
+                    let _ = writeln!(
+                        out,
+                        "\n  Written to {destination}; the original was left untouched."
+                    );
+                }
+                None => {
+                    out.push_str(
+                        "\n  Run with --apply to write the patched file; the original is left \
+                         untouched.\n",
+                    );
+                }
+            }
+        }
+        PortVerdict::AlreadyPortable { rationale } => {
+            out.push_str(&heading("No port needed"));
+            out.push_str(&field("state", "already portable"));
+            out.push_str(&format!("  {rationale}\n"));
+        }
+        PortVerdict::Refused { reason, detail } => {
+            out.push_str(&heading("Cannot be ported by patching"));
+            out.push_str(&field("reason", *reason));
+            out.push_str(&format!("  {detail}\n"));
+            out.push_str(&heading("What that means"));
+            out.push_str(
+                "  A patch changes only metadata: flags and header fields. It cannot change \
+                 machine code.\n \
+                 \x20 Porting this file therefore needs a rebuild from source, or a \n \
+                 \x20 recompiler — not this tool. Reporting it as portable would produce a \n \
+                 \x20 binary that loads and then fails, which is worse than saying so now.\n",
+            );
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

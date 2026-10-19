@@ -56,6 +56,7 @@ pub mod error;
 pub mod fixture;
 pub mod machine;
 pub mod parser;
+pub mod patch;
 pub mod reader;
 pub mod scanner;
 

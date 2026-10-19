@@ -40,6 +40,8 @@ pub enum Command {
     Verify,
     /// Classify every Windows image under a path.
     Scan,
+    /// Make a metadata-only port of a managed assembly, or explain why it cannot be done.
+    Port,
     /// Read and write the compatibility ledger.
     Oracle,
     /// Work with translation catalogs.
@@ -104,6 +106,17 @@ pub struct Options {
     /// The form a customer's engineering team works from: imported into a tracker or a
     /// spreadsheet rather than read.
     pub csv_path: Option<String>,
+    /// Actually write the patched binary, rather than only reporting what would change.
+    ///
+    /// Off by default, because rewriting a customer's binary is an action that has to be
+    /// deliberate. Without this flag `port` is a dry run: it prints every byte it would edit.
+    pub apply: bool,
+    /// Where to write the patched binary. Defaults to <input>.arm64.
+    ///
+    /// A separate file by default so the original is never destroyed. A migration tool that
+    /// overwrites the only copy of a customer's assembly, and then discovers the patch was
+    /// wrong, has destroyed the thing it was hired to preserve.
+    pub output: Option<String>,
 }
 
 /// Why parsing failed.
@@ -216,6 +229,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             "--limit" => options.limit = Some(take_value("--limit")?),
             "--all" => options.all = true,
             "--html" => options.html_path = Some(take_value("--html")?),
+            "--apply" => options.apply = true,
+            "--output" | "-o" => options.output = Some(take_value("--output")?),
             "--csv" => options.csv_path = Some(take_value("--csv")?),
             "--ledger" => options.ledger_path = Some(take_value("--ledger")?),
             "--lang" => options.lang = Some(take_value("--lang")?),
@@ -260,6 +275,7 @@ fn parse_command(word: &str) -> Option<Command> {
         "inspect" | "i" => Command::Inspect,
         "verify" | "v" => Command::Verify,
         "scan" | "s" => Command::Scan,
+        "port" | "p" => Command::Port,
         "oracle" | "o" => Command::Oracle,
         "locales" | "l" => Command::Locales,
         "help" => Command::Help,
@@ -283,6 +299,7 @@ COMMANDS
   inspect <binary>         Classify a binary: ABI family, requirements, likely route
   verify  <binary>         Decide whether a binary can run on this machine, and why
   scan    <path>           Classify every Windows image under a file or directory
+  port    <assembly>       Make a metadata-only Arm64 port, or explain why it cannot be done
   oracle  <subcommand>     Read and write the compatibility ledger
   locales <subcommand>     List, check and export translation catalogs
 
@@ -303,6 +320,8 @@ OPTIONS
   --all                    With scan, list every file rather than only the findings
   --html <path>            With scan, write a self-contained HTML assessment report
   --csv <path>             With scan, write one row per file as CSV
+  --apply                  With port, write the patched file instead of a dry run
+  --output <path>, -o      With port, where to write it (default: <input>.arm64)
   --depth <n>              With scan, how deep to descend (default 12)
   --limit <n>              With scan, how many files to examine (default 100000)
   --headless               Require the subject to run without a display
@@ -330,6 +349,8 @@ EXAMPLES
   compitum verify ./app.exe --headless --backends wine,fex
   compitum scan ./dist
   compitum scan ./dist --json > migration-report.json
+  compitum port ./lib/netstandard.dll
+  compitum port ./lib/netstandard.dll --apply
   compitum oracle record ./app.exe --record-outcome success --note 'ran fine'
   compitum oracle show 9f4390f8d30c2dd9...
 ",

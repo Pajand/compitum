@@ -51,6 +51,7 @@ use compitum_i18n::{Catalog, LocaleStore, Translator};
 use compitum_isa::{HostProfile, IsaFeature, Requirement, RequirementSource};
 use compitum_json::{to_pretty, Value};
 use compitum_oracle::{default_path, HostSnapshot, Ledger, Outcome, Provenance, Record};
+use compitum_pe::patch::{apply_edits, plan_port, PortVerdict};
 use compitum_pe::PeImage;
 use compitum_router::{decide, Backend, BackendSet, MigrationTarget, Request};
 
@@ -131,6 +132,7 @@ fn run(invocation: &Invocation, translator: &Translator) -> CliResult {
         Command::Inspect => command_inspect(invocation, translator),
         Command::Verify => command_verify(invocation, translator),
         Command::Scan => command_scan(invocation, translator),
+        Command::Port => command_port(invocation, translator),
         Command::Oracle => command_oracle(invocation, translator),
         Command::Locales => command_locales(invocation, translator),
     }
@@ -345,6 +347,177 @@ fn command_scan(invocation: &Invocation, translator: &Translator) -> CliResult {
     } else {
         Ok(EXIT_OK)
     }
+}
+
+// ---------------------------------------------------------------------------
+// port
+// ---------------------------------------------------------------------------
+
+/// Makes a metadata-only Arm64 port of a managed assembly, or says why it cannot.
+///
+/// # Why this command refuses so often
+///
+/// The tempting product is "port my x86 app to Arm64 automatically". It cannot be delivered
+/// honestly: turning x86-64 machine code into AArch64 is a recompiler's job, and flipping the
+/// `Machine` field alone produces a file that loads and then executes x86 instructions on an
+/// Arm64 processor. That is not a partial success, it is a corrupted binary — and a tool caught
+/// doing it once is finished.
+///
+/// What *can* be done honestly is narrower and real. A .NET assembly carries Intermediate
+/// Language, which the CLR compiles for whatever processor it runs on. What pins such an
+/// assembly to 32-bit is one flag, `COMIMAGE_FLAGS_32BITREQUIRED`, and clearing it is exactly
+/// what Microsoft's own `corflags /32BITREQ-` does. No instruction, no section and no import
+/// changes, so the edit is provably safe and trivially reversible.
+///
+/// # Why the default is a dry run
+///
+/// Rewriting a customer's binary is an action that has to be deliberate. Without `--apply` the
+/// command prints every byte it would change and writes nothing; with it, the output goes to a
+/// **new** file so the original survives a wrong decision.
+///
+/// # Exit codes
+///
+/// Follows the same contract as `verify`: `0` when the image is portable or already portable,
+/// `2` when a port is possible but was not applied (so CI can distinguish "needs action" from
+/// "failed"), and `1` when the command could not be carried out.
+fn command_port(invocation: &Invocation, translator: &Translator) -> CliResult {
+    let path = require_operand(invocation, 0, "a managed assembly path")?;
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("{path} does not exist"));
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let image =
+        compitum_pe::parse(&bytes).map_err(|e| format!("{path} could not be classified: {e}"))?;
+
+    // `port` is only meaningful towards Arm64, so it does not inherit the global default.
+    //
+    // Inheriting `linux-wine` made the command report "destination-not-arm64" for a file whose
+    // real obstacle was that it is native x86 — a true statement about the wrong thing, and the
+    // reader would have concluded the tool could not port anything. A command called `port`
+    // defaults to the destination a port exists for, and an explicit `--target linux-wine` is
+    // still honoured so the caller can see that answer if they ask for it.
+    let target = match &invocation.options.target {
+        Some(text) => MigrationTarget::from_id(text).ok_or_else(|| {
+            format!("`{text}` is not a migration target; expected `windows-on-arm` or `linux-wine`")
+        })?,
+        None => MigrationTarget::WindowsOnArm,
+    };
+    let target_arm64 = matches!(target, MigrationTarget::WindowsOnArm);
+    let verdict = plan_port(&bytes, &image, target_arm64);
+
+    // Applying happens BEFORE rendering, so the report can state what actually occurred rather
+    // than what could occur. Printing "run with --apply" to somebody who just did is the kind of
+    // small lie that makes an operator distrust the whole tool.
+    let mut written_to: Option<String> = None;
+    let mut exit = match verdict {
+        PortVerdict::Refused { .. } => EXIT_INCOMPATIBLE,
+        PortVerdict::AlreadyPortable { .. } => EXIT_OK,
+        // A dry run is not a failure: it succeeded at answering what would change. The exit code
+        // says "action available" so a pipeline can react without parsing prose.
+        PortVerdict::Safe { .. } => EXIT_INCOMPATIBLE,
+    };
+
+    if let PortVerdict::Safe { edits, .. } = &verdict {
+        if invocation.options.apply {
+            let destination = invocation
+                .options
+                .output
+                .clone()
+                .unwrap_or_else(|| format!("{path}.arm64"));
+
+            // The original file is never the destination. A patch that turns out to be wrong
+            // must not have destroyed the thing the tool was hired to preserve.
+            if destination == path {
+                return Err(
+                    "refusing to overwrite the input: a patch that turns out to be wrong must \
+                     not have destroyed the original. Use --output to choose a new path."
+                        .to_owned(),
+                );
+            }
+
+            let mut patched = bytes.clone();
+            apply_edits(&mut patched, edits).map_err(|error| error.to_string())?;
+
+            // Re-parse before writing. A patch that produced an unreadable file must never reach
+            // the disk where a customer's build could pick it up.
+            compitum_pe::parse(&patched).map_err(|error| {
+                format!(
+                    "the patch produced a file that no longer parses ({error}); nothing was \
+                     written"
+                )
+            })?;
+
+            std::fs::write(&destination, &patched)
+                .map_err(|error| format!("cannot write {destination}: {error}"))?;
+            written_to = Some(destination);
+            exit = EXIT_OK;
+        }
+    }
+
+    if invocation.options.json {
+        println!(
+            "{}",
+            to_pretty(&port_json(&path, &verdict, written_to.as_deref()))
+        );
+    } else {
+        print!(
+            "{}",
+            render::render_port(&path, &verdict, translator, written_to.as_deref())
+        );
+    }
+
+    Ok(exit)
+}
+
+/// The machine-readable form of a port plan.
+fn port_json(path: &str, verdict: &PortVerdict, written_to: Option<&str>) -> Value {
+    let mut doc = compitum_json::Object::new().with("path", path);
+    // `applied` is emitted for every outcome, so a consumer never has to infer whether a patch
+    // was written from the absence of a field.
+    doc.insert("applied", written_to.is_some());
+    if let Some(destination) = written_to {
+        doc.insert("output", destination);
+    }
+
+    match verdict {
+        PortVerdict::Safe { edits, rationale } => {
+            doc.insert("outcome", "safe");
+            doc.insert("rationale", rationale.as_str());
+            let items: Vec<Value> = edits
+                .iter()
+                .map(|edit| {
+                    compitum_json::Object::new()
+                        .with("offset", edit.offset)
+                        .with("field", edit.what.as_str())
+                        .with("before", hex_bytes(&edit.before))
+                        .with("after", hex_bytes(&edit.after))
+                        .into()
+                })
+                .collect();
+            doc.insert("edits", Value::Array(items));
+        }
+        PortVerdict::AlreadyPortable { rationale } => {
+            doc.insert("outcome", "already_portable");
+            doc.insert("rationale", rationale.as_str());
+        }
+        PortVerdict::Refused { reason, detail } => {
+            doc.insert("outcome", "refused");
+            doc.insert("reason", *reason);
+            doc.insert("detail", detail.as_str());
+        }
+    }
+
+    doc.into()
+}
+
+/// Renders bytes as uppercase hex, space separated.
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Parses a numeric option, refusing anything that is not a plain count.
