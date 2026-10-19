@@ -18,6 +18,10 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Generated assessment reports. Useful to look at, but they are build output: 170 KB
+# each, regenerated in seconds, so they would be noise in the history.
+/samples/
+
 # Local scratch space for the Oracle ledger and scratch binaries during development.
 # Committed fixtures live under tests/corpus and are deliberately NOT ignored.
 /oracle-data/
