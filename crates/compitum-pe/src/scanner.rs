@@ -80,6 +80,14 @@ pub struct ScanReport {
     /// because "the image uses SME once" and "the image is full of SME" are different
     /// signals and the Oracle benefits from knowing which.
     pub total_hits: usize,
+    /// `true` when the scan did not run because the image's architecture cannot contain
+    /// AArch64 instructions.
+    ///
+    /// Distinct from an empty result on purpose. "Scanned and found nothing" and "not
+    /// applicable to this architecture" are different statements, and a caller that merged
+    /// them would report an x86 image as having no instruction requirements when in fact
+    /// nothing was looked for.
+    pub skipped_not_aarch64: bool,
 }
 
 impl ScanReport {
@@ -326,13 +334,71 @@ fn classify(word: u32) -> Option<(IsaFeature, &'static str)> {
     None
 }
 
-/// Scans every executable section of a parsed image.
+/// Returns `true` when an image of this family can contain AArch64 instructions.
+///
+/// The list is deliberately explicit rather than "anything ARM64-ish": a reader has to be able
+/// to see why each family is included, and a family added later should force a decision here.
+#[must_use]
+fn can_contain_aarch64(family: crate::AbiFamily) -> bool {
+    use crate::AbiFamily;
+    match family {
+        AbiFamily::Arm64Native | AbiFamily::Arm64Fat | AbiFamily::Arm64Hybrid => true,
+        // The x86 side of a hybrid image: the PE machine type says AMD64, but the linked image
+        // carries AArch64 code too, and `compitum-pe` identifies it through the CHPE metadata.
+        AbiFamily::X86Hybrid => true,
+        AbiFamily::X86
+        | AbiFamily::X86_64
+        | AbiFamily::Arm32
+        | AbiFamily::Itanium
+        | AbiFamily::RiscV
+        | AbiFamily::LoongArch
+        | AbiFamily::PowerPc
+        | AbiFamily::Unknown
+        | AbiFamily::Other => false,
+    }
+}
+
+/// Scans every executable section of a parsed image for AArch64 instruction encodings.
 ///
 /// Returns a report whose `sections_scanned` reflects how many were actually readable, so
 /// that "scanned and found nothing" can be distinguished from "could not read the code".
+///
+/// # Only images that can contain AArch64 code are scanned
+///
+/// This is a real defect found by scanning genuine downloads from the internet, and it was
+/// severe: an x86 executable came back with "this host does not implement: sve" and was
+/// refused. x86 machine code cannot contain an AArch64 instruction. What happened is that a
+/// four-byte window of x86 code matched an SVE encoding pattern by coincidence, the scanner
+/// reported it as a requirement, and the router believed it — so **every** x86 and x86-64
+/// binary was liable to be refused for a feature its own architecture cannot express.
+///
+/// The root cause is that the pattern table decodes AArch64 words and was being applied to
+/// bytes from any architecture at all. A 32-bit instruction encoding is only meaningful if you
+/// know which instruction set you are decoding, so the family now gates the scan.
+///
+/// The families listed are exactly those that can hold AArch64 code:
+///
+/// * `Arm64Native` — all of it;
+/// * `Arm64Fat` — the ARM64 slice of a fat image;
+/// * `Arm64Hybrid` (ARM64EC) — the AArch64 functions, alongside x86-64 ones;
+/// * `X86Hybrid` — the x86 side of a hybrid image, which deliberately reports an x86 machine
+///   type while the linked image also contains AArch64 code. Excluding it would understate a
+///   real requirement.
+///
+/// Everything else — x86, x86-64, ARM32, Itanium, RISC-V and the rest — is skipped, and the
+/// report says so rather than silently returning nothing.
 #[must_use]
 pub fn scan_image(data: &[u8], image: &crate::PeImage) -> ScanReport {
     let mut combined = ScanReport::default();
+
+    if !can_contain_aarch64(image.family()) {
+        // Deliberately not an error and not an empty "clean" result: the report records zero
+        // sections scanned, which is how a caller distinguishes "not applicable" from "scanned
+        // and found nothing". Conflating those is the defect class this project keeps finding.
+        combined.skipped_not_aarch64 = true;
+        return combined;
+    }
+
     for section in image.sections.iter().filter(|s| s.is_executable()) {
         let start = section.raw_offset as usize;
         let end = start.saturating_add(section.raw_size as usize);
@@ -903,6 +969,84 @@ mod tests {
         assert_eq!(report.sections_scanned, 1);
         assert!(report.is_empty());
         assert_eq!(report.total_hits, 0);
+    }
+
+    #[test]
+    fn an_x86_image_is_not_hunted_for_aarch64_encodings() {
+        // THE REGRESSION GUARD for a defect found by downloading real software.
+        //
+        // `7z-x86.exe`, fetched from the vendor, came back REFUSED with "this host does not
+        // implement: sve" — from an x86 executable. x86 machine code cannot contain an AArch64
+        // instruction. Four bytes of x86 code had matched an SVE pattern by coincidence, the
+        // scanner reported it as a requirement, and the router believed it.
+        //
+        // The consequence was not subtle: every x86 and x86-64 binary was liable to be refused
+        // for a feature its own instruction set cannot express. Since almost every Windows
+        // program a customer owns is one of those two, the migration report would have
+        // condemned essentially everything.
+        let code = 0x0420_0002u32.to_le_bytes(); // a genuine SVE encoding
+        let bytes = pe_fixture::synthetic_with_code(machine::I386, &code, 0x1000);
+        let image = crate::parse(&bytes).unwrap();
+
+        let report = scan_image(&bytes, &image);
+
+        assert!(
+            report.skipped_not_aarch64,
+            "an x86 image must be reported as out of scope, not as clean"
+        );
+        assert!(
+            report.requirements.is_empty(),
+            "x86 code must not yield AArch64 requirements: {:?}",
+            report.features()
+        );
+        assert_eq!(report.sections_scanned, 0);
+    }
+
+    #[test]
+    fn out_of_scope_is_distinct_from_scanned_and_clean() {
+        // The distinction the whole project keeps returning to. "I did not look" and "I looked
+        // and found nothing" are different answers, and a caller that merged them would report
+        // an x86 image as having no instruction requirements when nothing was looked for.
+        let code = 0x0420_0002u32.to_le_bytes();
+
+        let x86 = pe_fixture::synthetic_with_code(machine::I386, &code, 0x1000);
+        let x86_image = crate::parse(&x86).unwrap();
+        let x86_report = scan_image(&x86, &x86_image);
+        assert!(x86_report.skipped_not_aarch64);
+        assert_eq!(x86_report.sections_scanned, 0);
+
+        let clean_arm = pe_fixture::synthetic(machine::ARM64, subsystem::CONSOLE, false);
+        let arm_image = crate::parse(&clean_arm).unwrap();
+        let arm_report = scan_image(&clean_arm, &arm_image);
+        assert!(!arm_report.skipped_not_aarch64);
+        assert_eq!(arm_report.sections_scanned, 1, "ARM64 is scanned");
+
+        // Both are empty of requirements, but they are not the same statement.
+        assert!(x86_report.is_empty());
+        assert!(arm_report.is_empty());
+    }
+
+    #[test]
+    fn every_arm64_flavour_is_still_scanned() {
+        // The gate must not over-reach in the other direction: a real ARM64 image with SVE must
+        // still be detected, or the fix would hide true requirements instead of false ones.
+        let code = 0x0420_0002u32.to_le_bytes();
+        for machine_value in [machine::ARM64, machine::ARM64EC, machine::ARM64X] {
+            let bytes = pe_fixture::synthetic_with_code(machine_value, &code, 0x1000);
+            let image = crate::parse(&bytes).unwrap();
+            let report = scan_image(&bytes, &image);
+            assert!(
+                !report.skipped_not_aarch64,
+                "family {:?} contains AArch64 code and must be scanned",
+                image.family()
+            );
+            assert_eq!(report.sections_scanned, 1);
+            assert!(
+                report.features().contains(&IsaFeature::Sve),
+                "family {:?} lost a real requirement",
+                image.family()
+            );
+        }
     }
 
     #[test]
