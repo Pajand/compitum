@@ -17,6 +17,8 @@ use compitum_json::{to_pretty, Value};
 use compitum_pe::PeImage;
 use compitum_router::{Plan, Severity};
 
+use crate::scan::{ScanKind, ScanReport};
+
 /// The width at which a label column is padded in human output.
 const LABEL_WIDTH: usize = 14;
 
@@ -546,6 +548,289 @@ pub fn render_locale_check(
         out.push_str("\n  This locale is complete.\n");
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// scan
+// ---------------------------------------------------------------------------
+
+/// Renders a batch scan for a human reader.
+///
+/// # What this report is for
+///
+/// This is the artefact a migration is decided from, so it leads with the number that decides
+/// it — how many images will not run — and only then shows the detail. The four outcome
+/// categories are reported separately and never summed into one figure, because "not a Windows
+/// image" and "a corrupt executable" are not the same kind of news.
+///
+/// `all` controls whether every scanned file is listed. The default shows only files that need
+/// attention, because a report over two thousand files is read for its exceptions.
+#[must_use]
+pub fn render_scan(report: &ScanReport, translator: &Translator, json: bool, all: bool) -> String {
+    if json {
+        return to_pretty(&scan_json(report, all)) + "\n";
+    }
+
+    let counts = report.counts;
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{} — {}\n",
+        translator.text("app.name"),
+        report.root
+    ));
+    out.push_str(&heading("Summary"));
+
+    out.push_str(&field("files", counts.files_seen));
+    out.push_str(&field("images", counts.routed));
+
+    // Reported only when it is non-zero. A line that usually reads "native 0" trains a reader
+    // to skim the block, and this block is the point of the whole report.
+    if counts.native > 0 {
+        out.push_str(&field("native", counts.native));
+    }
+    if counts.hybrid > 0 {
+        out.push_str(&field("hybrid", counts.hybrid));
+    }
+    if counts.translated > 0 {
+        out.push_str(&field("translated", counts.translated));
+    }
+    if counts.not_pe > 0 {
+        out.push_str(&field("not an image", counts.not_pe));
+    }
+
+    out.push_str(&heading("Will not run"));
+    let intrinsic = counts.will_not_run();
+    if intrinsic == 0 && counts.malformed == 0 {
+        if counts.routed == 0 {
+            // A conclusion drawn from no evidence. Saying "everything runs" about a directory
+            // containing no images would be the most confidently wrong sentence in the report.
+            out.push_str("  no Windows images were found, so nothing was decided\n");
+        } else if counts.environment_refused > 0 {
+            // THE case this section exists to get right.
+            //
+            // Every refusal was caused by this machine, so the scan learned nothing about the
+            // images. Printing "none refused" here would read as a clean bill of health and
+            // printing "refused" would read as a defect in the customer's software. Neither is
+            // true, and both are worse than saying nothing.
+            out.push_str(&format!(
+                "  undetermined: all {} image(s) were refused for reasons about THIS machine\n",
+                counts.environment_refused
+            ));
+            out.push_str(
+                "  no NT system-call layer or translator was available here, so the images were\n \
+                 \x20 never judged. Install the runtime, or declare one with --backends, and run\n \
+                 \x20 the scan again before drawing a conclusion.\n",
+            );
+        } else {
+            out.push_str(&format!(
+                "  none of the {} image(s) examined was refused\n",
+                counts.routed
+            ));
+        }
+    } else {
+        out.push_str(&field("will not run", intrinsic));
+        if counts.malformed > 0 {
+            out.push_str(&field("unparseable", counts.malformed));
+        }
+    }
+
+    // Environmental refusals are reported separately from findings, and never folded into the
+    // count above. A reader has to be able to see that a number describes the machine rather
+    // than the software.
+    if counts.environment_refused > 0 && intrinsic > 0 {
+        out.push_str(&heading("Beyond this machine"));
+        out.push_str(&field("refused", counts.environment_refused));
+        out.push_str(
+            "  these were refused because this machine lacks a runtime, not because of the\n \
+             \x20 image itself; they are excluded from the count above\n",
+        );
+    } else if counts.environment_refused > 0 {
+        out.push_str(&heading("Beyond this machine"));
+        out.push_str(&field("refused", counts.environment_refused));
+        out.push_str("  this machine lacks a runtime, so these images were not judged\n");
+    }
+
+    // Obstacles are separated from findings, and this is the distinction that keeps the report
+    // honest: an unreadable file means the scan did not see everything, which is a problem with
+    // the run rather than a result about the customer's software.
+    if counts.unreadable > 0 {
+        out.push_str(&heading("Not examined"));
+        out.push_str(&field("unreadable", counts.unreadable));
+        out.push_str("  these files were skipped, so the summary above is incomplete\n");
+    }
+
+    // Truncation is stated in the body, not only in the JSON, because a reader who trusts a
+    // partial report will underestimate the work a migration needs.
+    if report.truncated {
+        out.push_str(&heading("Truncated"));
+        out.push_str(&format!(
+            "  {}\n",
+            report
+                .truncated_reason
+                .as_deref()
+                .unwrap_or("the scan stopped before the tree was exhausted")
+        ));
+    }
+
+    let shown: Vec<&crate::scan::ScannedFile> = if all {
+        report.files.iter().collect()
+    } else {
+        crate::scan::blocking(&report.files)
+    };
+
+    if !shown.is_empty() {
+        out.push_str(&heading(if all {
+            "Files"
+        } else {
+            "Files needing attention"
+        }));
+        for file in shown {
+            out.push_str(&format!("  {:<48} {}\n", file.path, describe(&file.kind)));
+        }
+    }
+
+    // Named, but under their own heading. An operator who saw seven refused files and no
+    // explanation would reasonably suspect the scanner, and the list is what turns an alarming
+    // number into an instruction: install the runtime and run the scan again.
+    if !all {
+        let beyond = crate::scan::beyond_this_machine(&report.files);
+        if !beyond.is_empty() {
+            out.push_str(&heading("Files not judged (this machine)"));
+            for file in beyond {
+                out.push_str(&format!("  {:<48} {}\n", file.path, describe(&file.kind)));
+            }
+        }
+    }
+
+    if !all && counts.unreadable > 0 {
+        out.push_str(&heading("Files not examined"));
+        for file in crate::scan::obstacles(&report.files) {
+            out.push_str(&format!("  {:<48} {}\n", file.path, describe(&file.kind)));
+        }
+    }
+
+    if all {
+        // Grouped counts, so the route vocabulary is visible without reading every line.
+        let grouped = crate::scan::by_route(&report.files);
+        if !grouped.is_empty() {
+            out.push_str(&heading("By route"));
+            for (route, count) in grouped {
+                out.push_str(&field(&route, count));
+            }
+        }
+    }
+
+    out
+}
+
+/// A one-line description of what happened to a file.
+fn describe(kind: &ScanKind) -> String {
+    match kind {
+        ScanKind::Routed(routed) => format!("{}  ({})", routed.status, routed.route),
+        ScanKind::NotPe => "not-a-windows-image".to_owned(),
+        ScanKind::Malformed { message } => format!("unparseable: {message}"),
+        ScanKind::Unreadable { message } => format!("unreadable: {message}"),
+    }
+}
+
+/// The machine-readable form of a scan.
+///
+/// `counts` is always complete; `files` respects `all`, because a JSON report over two thousand
+/// files is usually wanted for its summary and its exceptions.
+#[must_use]
+pub fn scan_json(report: &ScanReport, all: bool) -> Value {
+    let counts = report.counts;
+    let counts_json = compitum_json::Object::new()
+        .with("files_seen", counts.files_seen)
+        .with("routed", counts.routed)
+        // Emitted because every derived flag below depends on it, and a consumer cannot compute
+        // it without knowing that `will_not_run` excludes environmental refusals. Making the
+        // question "did this scan learn anything?" explicit is what stops a consumer reading an
+        // unmeasured result as a clean one.
+        .with("judged", counts.judged())
+        .with("native", counts.native)
+        .with("hybrid", counts.hybrid)
+        .with("translated", counts.translated)
+        .with("refused", counts.refused)
+        // Emitted alongside `refused` so a consumer never has to re-derive the subtraction and
+        // get the attribution wrong. `will_not_run` is the number a migration quotes; `refused`
+        // is the router's raw count and includes refusals caused by the scanning machine.
+        .with("environment_refused", counts.environment_refused)
+        .with("will_not_run", counts.will_not_run())
+        .with("not_pe", counts.not_pe)
+        .with("malformed", counts.malformed)
+        .with("unreadable", counts.unreadable)
+        // Derived booleans, emitted so a consumer does not have to re-derive the rules and get
+        // the empty-tree and all-environmental cases wrong.
+        .with("entirely_native", counts.is_entirely_native())
+        .with(
+            "inconclusive_about_the_images",
+            counts.is_inconclusive_about_the_images(),
+        );
+
+    let selected: Vec<Value> = if all {
+        report.files.iter().map(file_json).collect()
+    } else {
+        crate::scan::blocking(&report.files)
+            .into_iter()
+            .chain(crate::scan::obstacles(&report.files))
+            .map(file_json)
+            .collect()
+    };
+
+    compitum_json::Object::new()
+        .with("root", report.root.as_str())
+        .with("counts", counts_json)
+        .with("truncated", report.truncated)
+        .with("truncated_reason", report.truncated_reason.as_deref())
+        .with("files", Value::Array(selected))
+        .into()
+}
+
+/// One file as JSON.
+fn file_json(file: &crate::scan::ScannedFile) -> Value {
+    let mut object = compitum_json::Object::new()
+        .with("path", file.path.as_str())
+        .with("outcome", outcome_id(&file.kind));
+
+    if let ScanKind::Routed(routed) = &file.kind {
+        object.insert("abi_family", routed.abi_family.as_str());
+        object.insert("route", routed.route.as_str());
+        object.insert("status", routed.status.as_str());
+        object.insert("blocked", routed.blocked);
+        object.insert("fully_native", routed.fully_native);
+        object.insert("confidence_permille", routed.confidence_permille);
+        object.insert(
+            "required_features",
+            Value::Array(
+                routed
+                    .required_features
+                    .iter()
+                    .map(|id| Value::String(id.clone()))
+                    .collect(),
+            ),
+        );
+        object.insert("headline", routed.headline.as_str());
+    }
+
+    match &file.kind {
+        ScanKind::Malformed { message } | ScanKind::Unreadable { message } => {
+            object.insert("message", message.as_str());
+        }
+        ScanKind::Routed(_) | ScanKind::NotPe => {}
+    }
+
+    object.into()
+}
+
+/// The stable identifier for an outcome, for JSON consumers.
+fn outcome_id(kind: &ScanKind) -> &'static str {
+    match kind {
+        ScanKind::Routed(_) => "routed",
+        ScanKind::NotPe => "not_pe",
+        ScanKind::Malformed { .. } => "malformed",
+        ScanKind::Unreadable { .. } => "unreadable",
+    }
 }
 
 #[cfg(test)]

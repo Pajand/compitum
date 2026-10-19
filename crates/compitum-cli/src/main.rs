@@ -40,6 +40,7 @@
 
 mod args;
 mod render;
+mod scan;
 
 use std::process::ExitCode;
 
@@ -128,6 +129,7 @@ fn run(invocation: &Invocation, translator: &Translator) -> CliResult {
         Command::Host => command_host(invocation, translator),
         Command::Inspect => command_inspect(invocation, translator),
         Command::Verify => command_verify(invocation, translator),
+        Command::Scan => command_scan(invocation, translator),
         Command::Oracle => command_oracle(invocation, translator),
         Command::Locales => command_locales(invocation, translator),
     }
@@ -241,6 +243,97 @@ fn command_verify(invocation: &Invocation, translator: &Translator) -> CliResult
     } else {
         Ok(EXIT_OK)
     }
+}
+
+// ---------------------------------------------------------------------------
+// scan
+// ---------------------------------------------------------------------------
+
+/// Classifies every Windows image under a path.
+///
+/// # Why this is a command and not a flag on `verify`
+///
+/// `verify` answers a question about one file and reports it in full, with the reasoning and
+/// the ledger record. A scan answers a question about a *tree* and reports a summary, because
+/// the reader is deciding what work to schedule rather than judging one binary. Folding the two
+/// together would make each produce output that is wrong for the other's purpose.
+///
+/// The exit code follows `verify`'s contract so a CI pipeline treats them the same way: **2**
+/// when at least one image was examined and at least one of them will not run, which is an
+/// answer rather than a failure.
+///
+/// # What is deliberately not done here
+///
+/// Nothing is written to the ledger. A tree walk reads files the operator has not vouched for,
+/// and a scan of a stray directory should not be able to add hundreds of rows to the dataset.
+/// Recording stays an explicit act, which is the same reason `--no-record` exists.
+fn command_scan(invocation: &Invocation, translator: &Translator) -> CliResult {
+    let target = require_operand(invocation, 0, "a file or directory to scan")?;
+    let path = std::path::Path::new(&target);
+
+    if !path.exists() {
+        return Err(format!("{target} does not exist"));
+    }
+
+    let depth = parse_bound(
+        &invocation.options.depth,
+        "--depth",
+        scan::DEFAULT_MAX_DEPTH,
+    )?;
+    let limit = parse_bound(
+        &invocation.options.limit,
+        "--limit",
+        scan::DEFAULT_MAX_FILES,
+    )?;
+
+    let host = HostProfile::probe();
+    let backends = resolve_backends(&invocation.options);
+
+    // The plain entry point is used when the operator asked for nothing special, so the common
+    // case exercises the same code path the library exposes to every other caller.
+    let report = if invocation.options.depth.is_none() && invocation.options.limit.is_none() {
+        scan::scan_path(path, &host, backends)
+    } else {
+        scan::scan_path_with_limits(path, &host, backends, depth, limit)
+    };
+    let text = render::render_scan(
+        &report,
+        translator,
+        invocation.options.json,
+        invocation.options.all,
+    );
+    print!("{text}");
+
+    // A run that could not examine everything has not answered the question it was asked, so it
+    // is reported as an incomplete result rather than as a decision. This is the same
+    // distinction the exit-code contract draws between "an answer" and "could not answer".
+    if report.truncated {
+        eprintln!(
+            "compitum: the scan was truncated, so the summary above is incomplete; \
+             raise --limit or lower --depth if the whole tree matters"
+        );
+        return Ok(EXIT_ERROR);
+    }
+
+    if report.counts.routed > 0 && report.counts.will_not_run() > 0 {
+        Ok(EXIT_INCOMPATIBLE)
+    } else {
+        Ok(EXIT_OK)
+    }
+}
+
+/// Parses a numeric option, refusing anything that is not a plain count.
+///
+/// A silent fallback to the default would mean a typo in `--limit 0` quietly widened the scan
+/// instead of narrowing it, and the operator would read a complete-looking report that was not
+/// the one they asked for.
+fn parse_bound(value: &Option<String>, name: &str, default: usize) -> Result<usize, String> {
+    let Some(text) = value else {
+        return Ok(default);
+    };
+    text.trim()
+        .parse::<usize>()
+        .map_err(|_| format!("{name} needs a whole number, got `{text}`"))
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,8 @@ pub enum Command {
     Inspect,
     /// Classify a binary and decide whether it can run here.
     Verify,
+    /// Classify every Windows image under a path.
+    Scan,
     /// Read and write the compatibility ledger.
     Oracle,
     /// Work with translation catalogs.
@@ -79,6 +81,12 @@ pub struct Options {
     /// a query — so which one is being written to is a decision an operator should make
     /// explicitly rather than inherit invisibly.
     pub store: Option<String>,
+    /// How deep `scan` descends into a directory tree.
+    pub depth: Option<String>,
+    /// How many files `scan` will examine before it stops.
+    pub limit: Option<String>,
+    /// List every scanned file, not only the ones that need attention.
+    pub all: bool,
 }
 
 /// Why parsing failed.
@@ -186,6 +194,9 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             "--no-record" => options.no_record = true,
             "--assume-backends" => options.assume_backends = true,
             "--store" => options.store = Some(take_value("--store")?),
+            "--depth" => options.depth = Some(take_value("--depth")?),
+            "--limit" => options.limit = Some(take_value("--limit")?),
+            "--all" => options.all = true,
             "--ledger" => options.ledger_path = Some(take_value("--ledger")?),
             "--lang" => options.lang = Some(take_value("--lang")?),
             "--require" => options.require_feature.push(take_value("--require")?),
@@ -228,6 +239,7 @@ fn parse_command(word: &str) -> Option<Command> {
         "host" | "h" => Command::Host,
         "inspect" | "i" => Command::Inspect,
         "verify" | "v" => Command::Verify,
+        "scan" | "s" => Command::Scan,
         "oracle" | "o" => Command::Oracle,
         "locales" | "l" => Command::Locales,
         "help" => Command::Help,
@@ -250,6 +262,7 @@ COMMANDS
   host                     Report this machine's ARM64 capabilities and Linux ABI
   inspect <binary>         Classify a binary: ABI family, requirements, likely route
   verify  <binary>         Decide whether a binary can run on this machine, and why
+  scan    <path>           Classify every Windows image under a file or directory
   oracle  <subcommand>     Read and write the compatibility ledger
   locales <subcommand>     List, check and export translation catalogs
 
@@ -267,6 +280,9 @@ LOCALES SUBCOMMANDS
 OPTIONS
   --json                   Emit machine-readable JSON
   --verbose, -v            Show every reason, including supporting ones
+  --all                    With scan, list every file rather than only the findings
+  --depth <n>              With scan, how deep to descend (default 12)
+  --limit <n>              With scan, how many files to examine (default 100000)
   --headless               Require the subject to run without a display
   --require <feature>      Declare a required CPU feature (repeatable)
   --backends <list>        Installed backends, comma separated
@@ -287,6 +303,8 @@ EXAMPLES
   compitum host --json
   compitum verify ./app.exe
   compitum verify ./app.exe --headless --backends wine,fex
+  compitum scan ./dist
+  compitum scan ./dist --json > migration-report.json
   compitum oracle record ./app.exe --record-outcome success --note 'ran fine'
   compitum oracle show 9f4390f8d30c2dd9...
 ",
