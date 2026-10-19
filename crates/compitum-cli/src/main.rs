@@ -40,6 +40,7 @@
 
 mod args;
 mod render;
+mod report;
 mod scan;
 
 use std::process::ExitCode;
@@ -299,6 +300,27 @@ fn command_scan(invocation: &Invocation, translator: &Translator) -> CliResult {
     } else {
         scan::scan_path_with_limits(path, &host, backends, target, depth, limit)
     };
+    // ---- Deliverables ----------------------------------------------------
+    //
+    // Written BEFORE stdout, because these are the artefacts the engagement is judged on. If
+    // something fails while writing them the operator must see it as an error, not discover a
+    // missing report later; printing the summary first would make a failed write look like a
+    // successful run.
+    if let Some(destination) = &invocation.options.html_path {
+        let generated_at = format_utc(now_unix()).unwrap_or_else(|| "unknown".to_owned());
+        let document = report::render_html(&report, &generated_at, env!("CARGO_PKG_VERSION"));
+        std::fs::write(destination, document)
+            .map_err(|error| format!("cannot write {destination}: {error}"))?;
+        eprintln!("compitum: wrote HTML assessment to {destination}");
+    }
+
+    if let Some(destination) = &invocation.options.csv_path {
+        let table = report::render_csv(&report);
+        std::fs::write(destination, table)
+            .map_err(|error| format!("cannot write {destination}: {error}"))?;
+        eprintln!("compitum: wrote CSV inventory to {destination}");
+    }
+
     let text = render::render_scan(
         &report,
         translator,
@@ -756,6 +778,52 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Formats a Unix timestamp as an ISO-8601 UTC date and time.
+///
+/// # Why this is hand-written
+///
+/// A date library would be the first third-party dependency in the workspace, and the whole
+/// supply-chain argument for this project rests on there being none. The conversion is a
+/// well-defined calendar calculation, so it is written out rather than pulled in — and a report
+/// timestamp does not need time zones, leap seconds or locale.
+///
+/// Returns `None` for a timestamp outside the range this can represent, rather than inventing a
+/// plausible-looking date. A report that states a wrong date is worse than one that states none.
+#[must_use]
+fn format_utc(unix: i64) -> Option<String> {
+    if unix < 0 {
+        // A pre-1970 timestamp means the clock is wrong, and a report must not pretend otherwise.
+        return None;
+    }
+    let seconds = unix as u64;
+    let days = seconds / 86_400;
+    let remainder = seconds % 86_400;
+    let hour = remainder / 3_600;
+    let minute = (remainder % 3_600) / 60;
+    let second = remainder % 60;
+
+    // Civil-from-days, from Howard Hinnant's algorithm. Shifting the epoch to 0000-03-01 makes
+    // the leap-year rule a single division, which avoids a loop over years.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    if year > 9999 {
+        return None;
+    }
+
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
 }
 
 /// Convenience for tests and future embedded use.

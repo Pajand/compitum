@@ -298,6 +298,12 @@ impl ScanCounts {
 pub struct ScanReport {
     /// Where the walk began, as given.
     pub root: String,
+    /// The destination the analysis was performed against.
+    ///
+    /// Carried in the report because a verdict without a destination is not a verdict. The same
+    /// binary is native on one target and translated on another, so a report that omitted this
+    /// could not be read correctly even by someone who knew the tool.
+    pub target: MigrationTarget,
     /// One entry per file examined, sorted by path.
     pub files: Vec<ScannedFile>,
     /// Aggregate counts.
@@ -379,6 +385,7 @@ pub fn scan_path_with_limits(
 
     ScanReport {
         root: root_display,
+        target,
         files,
         counts,
         truncated,

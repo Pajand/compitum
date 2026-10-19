@@ -93,6 +93,17 @@ pub struct Options {
     pub limit: Option<String>,
     /// List every scanned file, not only the ones that need attention.
     pub all: bool,
+    /// Write a self-contained HTML report to this path.
+    ///
+    /// The document a migration is decided from: opened by people who did not run the command,
+    /// forwarded, filed, and printed. It carries the destination, the readiness figure, the four
+    /// actions, and every limitation of the analysis.
+    pub html_path: Option<String>,
+    /// Write a CSV of one row per file to this path.
+    ///
+    /// The form a customer's engineering team works from: imported into a tracker or a
+    /// spreadsheet rather than read.
+    pub csv_path: Option<String>,
 }
 
 /// Why parsing failed.
@@ -204,6 +215,8 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             "--depth" => options.depth = Some(take_value("--depth")?),
             "--limit" => options.limit = Some(take_value("--limit")?),
             "--all" => options.all = true,
+            "--html" => options.html_path = Some(take_value("--html")?),
+            "--csv" => options.csv_path = Some(take_value("--csv")?),
             "--ledger" => options.ledger_path = Some(take_value("--ledger")?),
             "--lang" => options.lang = Some(take_value("--lang")?),
             "--require" => options.require_feature.push(take_value("--require")?),
@@ -288,6 +301,8 @@ OPTIONS
   --json                   Emit machine-readable JSON
   --verbose, -v            Show every reason, including supporting ones
   --all                    With scan, list every file rather than only the findings
+  --html <path>            With scan, write a self-contained HTML assessment report
+  --csv <path>             With scan, write one row per file as CSV
   --depth <n>              With scan, how deep to descend (default 12)
   --limit <n>              With scan, how many files to examine (default 100000)
   --headless               Require the subject to run without a display

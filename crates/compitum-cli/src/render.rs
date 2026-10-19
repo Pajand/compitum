@@ -612,15 +612,30 @@ pub fn render_scan(report: &ScanReport, translator: &Translator, json: bool, all
 
     // Given their own section rather than a line in the summary, because the consequence is not
     // obvious from the numbers: a driver routes natively, so every architectural figure above
-    // says "fine", and none of them says that it cannot be loaded by a user-mode layer at all.
+    // says "fine", and none of them says whether the destination can load it.
+    //
+    // The verdict depends on the destination, and stating it unconditionally was a defect: the
+    // terminal summary told a Windows assessment to "expect a driver rewrite" while the HTML
+    // report generated from the same run correctly listed those drivers as needing no work.
+    // Two outputs of one analysis must not disagree.
     if counts.kernel_driver > 0 {
         out.push_str(&heading("Kernel drivers"));
-        out.push_str(&format!(
-            "  {} image(s) import ntoskrnl.exe, so they run in kernel mode and cannot be\n \
-             \x20 loaded by a user-mode compatibility layer. Their native route is correct and\n \
-             \x20 does not mean they will run here: expect a driver rewrite, not a port.\n",
-            counts.kernel_driver
-        ));
+        if report.target.loads_kernel_drivers(true) {
+            out.push_str(&format!(
+                "  {} image(s) import ntoskrnl.exe and are built for Arm64, so {} loads them\n \
+                 \x20 as native kernel code. No port is needed.\n",
+                counts.kernel_driver,
+                report.target.id()
+            ));
+        } else {
+            out.push_str(&format!(
+                "  {} image(s) import ntoskrnl.exe, so they run in kernel mode, which {} cannot\n \
+                 \x20 load: emulation covers user-mode code only. Their native route is correct\n \
+                 \x20 and does not mean they will run here — expect a driver rewrite, not a port.\n",
+                counts.kernel_driver,
+                report.target.id()
+            ));
+        }
     }
 
     out.push_str(&heading("Will not run"));
