@@ -122,6 +122,30 @@ pub enum ReasonCode {
     /// The NT system-call layer is absent.
     SyscallLayerAbsent,
 
+    // ---- Migration target --------------------------------------------------
+    /// The destination supplies a translation layer the image needs.
+    ///
+    /// The clear case is ARM64EC on Windows on Arm, where the operating system itself
+    /// implements the AArch64/x86-64 boundary, so no separate translator is loaded.
+    TargetProvidesTranslation,
+    /// The destination supplies the NT system-call layer itself.
+    ///
+    /// On Windows this is the operating system; on Linux it is Wine, a package the operator
+    /// must install. Reporting the Linux case as "the binary cannot run" confuses a missing
+    /// dependency with a defect in the software.
+    TargetSuppliesSyscallLayer,
+    /// A kernel driver would have to be emulated, which no target supports.
+    ///
+    /// Microsoft states that emulation covers user-mode code only and that kernel components
+    /// must be built for Arm64; on Linux a Windows driver cannot load at all. Either way the
+    /// answer is a rewrite rather than a port.
+    KernelDriverEmulated,
+    /// A kernel driver is native for the destination and loads normally.
+    ///
+    /// An Arm64 driver on Windows on Arm is ordinary native kernel code. Conflating this with
+    /// the emulated case would tell a customer to rewrite a driver that already works.
+    KernelDriverNative,
+
     // ---- Cross-cutting -----------------------------------------------------
     /// The host is not an ARM64 machine, so this analysis does not describe it.
     HostIsNotArm64,
@@ -158,6 +182,10 @@ impl ReasonCode {
             ReasonCode::HostIsNotArm64 => "host_is_not_arm64",
             ReasonCode::InsufficientInformation => "insufficient_information",
             ReasonCode::UnreadableSubject => "unreadable_subject",
+            ReasonCode::TargetProvidesTranslation => "target_provides_translation",
+            ReasonCode::TargetSuppliesSyscallLayer => "target_supplies_syscall_layer",
+            ReasonCode::KernelDriverEmulated => "kernel_driver_emulated",
+            ReasonCode::KernelDriverNative => "kernel_driver_native",
         }
     }
 
@@ -207,6 +235,16 @@ impl ReasonCode {
             // A non-ARM64 host makes this whole analysis inapplicable, which is a caution
             // rather than a defect in the subject.
             ReasonCode::HostIsNotArm64 => Severity::Caution,
+
+            // The destination supplying something the image needs is good news, and worth
+            // showing: it is the difference between "install a translator" and "it just runs".
+            ReasonCode::TargetProvidesTranslation
+            | ReasonCode::TargetSuppliesSyscallLayer
+            | ReasonCode::KernelDriverNative => Severity::Supporting,
+
+            // A driver that would have to be emulated is not a warning: no target emulates
+            // kernel-mode code, so this is a rewrite and must block a port.
+            ReasonCode::KernelDriverEmulated => Severity::Blocked,
         }
     }
 
@@ -231,6 +269,10 @@ impl ReasonCode {
         ReasonCode::BackendAbsent,
         ReasonCode::SyscallLayerPresent,
         ReasonCode::SyscallLayerAbsent,
+        ReasonCode::TargetProvidesTranslation,
+        ReasonCode::TargetSuppliesSyscallLayer,
+        ReasonCode::KernelDriverEmulated,
+        ReasonCode::KernelDriverNative,
         ReasonCode::HostIsNotArm64,
         ReasonCode::InsufficientInformation,
         ReasonCode::UnreadableSubject,
@@ -521,7 +563,20 @@ mod tests {
             .filter(|c| c.default_severity() == Severity::Blocked)
             .map(|c| c.id())
             .collect();
-        // A closed, deliberately small set. Adding to it should require justification.
+        // A closed, deliberately small set. Adding to it should require justification, which
+        // is exactly what this assertion just forced: `kernel_driver_emulated` was added for
+        // the following reason.
+        //
+        // A kernel driver whose architecture the destination cannot execute has no route at
+        // all. Microsoft states that emulation covers user-mode code only, so an x86 driver
+        // cannot be emulated on Windows on Arm; on Linux no Windows driver loads at any
+        // architecture. The honest answer is "this needs a driver rewrite", and presenting it
+        // as anything softer would send a customer to schedule a port that cannot succeed.
+        //
+        // Note what is NOT in this list: `kernel_driver_native`. An Arm64 driver on Windows on
+        // Arm is ordinary native kernel code and must not block — the first implementation of
+        // that distinction got it backwards and would have told a customer to rewrite a driver
+        // that already works.
         assert_eq!(
             blocking,
             vec![
@@ -529,6 +584,7 @@ mod tests {
                 "isa_features_missing",
                 "backend_absent",
                 "syscall_layer_absent",
+                "kernel_driver_emulated",
                 "unreadable_subject",
             ]
         );

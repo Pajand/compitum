@@ -51,7 +51,7 @@ use compitum_isa::{HostProfile, IsaFeature, Requirement, RequirementSource};
 use compitum_json::{to_pretty, Value};
 use compitum_oracle::{default_path, HostSnapshot, Ledger, Outcome, Provenance, Record};
 use compitum_pe::PeImage;
-use compitum_router::{decide, Backend, BackendSet, Request};
+use compitum_router::{decide, Backend, BackendSet, MigrationTarget, Request};
 
 /// Exit code for a completed run with a favourable or unneeded verdict.
 const EXIT_OK: u8 = 0;
@@ -190,6 +190,7 @@ fn command_verify(invocation: &Invocation, translator: &Translator) -> CliResult
 
     let host = HostProfile::probe();
     let backends = resolve_backends(&invocation.options);
+    let target = resolve_target(&invocation.options)?;
 
     // Instruction-level analysis is what turns "declared architecture" into "actually
     // requires SME", so it runs on every verify.
@@ -201,6 +202,7 @@ fn command_verify(invocation: &Invocation, translator: &Translator) -> CliResult
 
     let request = Request::new(image.clone(), host.clone(), backends)
         .with_requirements(requirements)
+        .with_target(target)
         .headless_only(invocation.options.headless_only);
 
     let plan = decide(&request);
@@ -288,13 +290,14 @@ fn command_scan(invocation: &Invocation, translator: &Translator) -> CliResult {
 
     let host = HostProfile::probe();
     let backends = resolve_backends(&invocation.options);
+    let target = resolve_target(&invocation.options)?;
 
     // The plain entry point is used when the operator asked for nothing special, so the common
     // case exercises the same code path the library exposes to every other caller.
     let report = if invocation.options.depth.is_none() && invocation.options.limit.is_none() {
-        scan::scan_path(path, &host, backends)
+        scan::scan_path(path, &host, backends, target)
     } else {
-        scan::scan_path_with_limits(path, &host, backends, depth, limit)
+        scan::scan_path_with_limits(path, &host, backends, target, depth, limit)
     };
     let text = render::render_scan(
         &report,
@@ -638,6 +641,26 @@ fn resolve_backends(options: &Options) -> BackendSet {
         return set;
     }
     compitum_router::discover().backend_set()
+}
+
+/// Resolves where the software is going.
+///
+/// # Why an unknown destination is an error rather than a default
+///
+/// A mistyped `--target` that silently fell back to the default would produce a confident
+/// analysis of **the wrong platform**. For a migration report that is the worst possible
+/// failure: the customer would receive a defect list for a destination they are not moving to,
+/// or worse, a clean bill of health for one they are.
+///
+/// A silent default is acceptable for a value the operator did not mention. It is not
+/// acceptable for one they did mention and got wrong.
+fn resolve_target(options: &Options) -> Result<MigrationTarget, String> {
+    let Some(text) = &options.target else {
+        return Ok(MigrationTarget::default());
+    };
+    MigrationTarget::from_id(text).ok_or_else(|| {
+        format!("`{text}` is not a migration target; expected `windows-on-arm` or `linux-wine`")
+    })
 }
 
 /// Records a static analysis observation, unless `--no-record` was passed.

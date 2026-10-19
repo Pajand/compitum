@@ -147,6 +147,11 @@ impl Plan {
                  compatibility environment."
                     .to_owned()
             }
+            Route::DestinationEmulates => {
+                "Runs under the destination's own emulator: it will work, and every \
+                 instruction is translated, so rebuilding for Arm64 is what makes it native."
+                    .to_owned()
+            }
             Route::Refused => "Cannot run.".to_owned(),
         }
     }
@@ -192,6 +197,9 @@ impl Plan {
             Route::FexPartial => "HYBRID",
             Route::Box64Full | Route::FexFull => "TRANSLATED",
             Route::Wow64 => "WOW64",
+            // Deliberately not "TRANSLATED": the emulation is the destination's, not a backend
+            // the operator installed, and it is the difference a migration cares about.
+            Route::DestinationEmulates => "EMULATED",
             Route::Refused => "REFUSED",
         }
     }

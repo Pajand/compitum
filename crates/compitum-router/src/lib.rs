@@ -75,9 +75,11 @@ pub mod engine;
 pub mod plan;
 pub mod reason;
 pub mod route;
+pub mod target;
 
 pub use discovery::{discover, BackendProbe, Discovery, Found};
 pub use engine::{decide, Request, Subject};
 pub use plan::{Plan, SCHEMA_VERSION};
 pub use reason::{Reason, ReasonCode, Reasons, Severity};
 pub use route::{Backend, BackendSet, Route, ThroughputExpectation};
+pub use target::MigrationTarget;

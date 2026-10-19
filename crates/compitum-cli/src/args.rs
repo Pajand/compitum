@@ -81,6 +81,12 @@ pub struct Options {
     /// a query — so which one is being written to is a decision an operator should make
     /// explicitly rather than inherit invisibly.
     pub store: Option<String>,
+    /// Where the software is going: `windows-on-arm` or `linux-wine`.
+    ///
+    /// A route is only meaningful relative to a destination. This router used to assume the
+    /// destination was always "this machine with whatever is installed here", which turned a
+    /// migration question into a Wine compatibility check.
+    pub target: Option<String>,
     /// How deep `scan` descends into a directory tree.
     pub depth: Option<String>,
     /// How many files `scan` will examine before it stops.
@@ -194,6 +200,7 @@ pub fn parse(args: &[String]) -> Result<Invocation, ParseError> {
             "--no-record" => options.no_record = true,
             "--assume-backends" => options.assume_backends = true,
             "--store" => options.store = Some(take_value("--store")?),
+            "--target" => options.target = Some(take_value("--target")?),
             "--depth" => options.depth = Some(take_value("--depth")?),
             "--limit" => options.limit = Some(take_value("--limit")?),
             "--all" => options.all = true,
@@ -285,6 +292,9 @@ OPTIONS
   --limit <n>              With scan, how many files to examine (default 100000)
   --headless               Require the subject to run without a display
   --require <feature>      Declare a required CPU feature (repeatable)
+  --target <destination>   Where the software is going:
+                             windows-on-arm  the OS supplies NT, Prism and ARM64EC
+                             linux-wine      this machine, with Wine installed (default)
   --backends <list>        Installed backends, comma separated
                            (wine, fex, box64, box86)
   --assume-backends        Treat every known backend as installed

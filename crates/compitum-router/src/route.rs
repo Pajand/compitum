@@ -47,6 +47,17 @@ pub enum Route {
     FexFull,
     /// A 32-bit x86 image translated in full, inside a WOW64-style environment.
     Wow64,
+    /// The destination emulates this image itself, so it runs — but **not** emulation-free.
+    ///
+    /// Windows 11 on Arm ships Prism and emulates x86 and x86-64 with no additional component,
+    /// so such an image does work on the destination. It is still not the goal: every
+    /// instruction is translated, so the answer for a migration is "it will run, and to stop
+    /// paying for translation it must be rebuilt for Arm64".
+    ///
+    /// Distinct from [`Route::Native`] because that difference is the whole product, and
+    /// distinct from [`Route::Refused`] because telling a customer their working x86-64
+    /// application cannot run would be flatly false.
+    DestinationEmulates,
     /// Execution is not possible on this host with the backends available.
     Refused,
 }
@@ -62,6 +73,7 @@ impl Route {
             Route::Box64Full => "box64_full",
             Route::FexFull => "fex_full",
             Route::Wow64 => "wow64",
+            Route::DestinationEmulates => "destination_emulates",
             Route::Refused => "refused",
         }
     }
@@ -85,7 +97,10 @@ impl Route {
     /// Returns `true` when the entire image must be translated.
     #[must_use]
     pub fn is_fully_translated(self) -> bool {
-        matches!(self, Route::Box64Full | Route::FexFull | Route::Wow64)
+        matches!(
+            self,
+            Route::Box64Full | Route::FexFull | Route::Wow64 | Route::DestinationEmulates
+        )
     }
 
     /// Returns `true` when execution cannot proceed.
@@ -99,6 +114,8 @@ impl Route {
     pub fn required_backend(self) -> Option<Backend> {
         match self {
             Route::Native | Route::PickNativeSlice | Route::Refused => None,
+            // No backend of ours: the destination supplies the translator itself.
+            Route::DestinationEmulates => None,
             Route::FexPartial | Route::FexFull => Some(Backend::Fex),
             Route::Box64Full => Some(Backend::Box64),
             Route::Wow64 => Some(Backend::Box86),
@@ -139,6 +156,12 @@ impl Route {
                 max_percent: 40,
                 basis: "32-bit translation inside an additional WOW64 environment",
             }),
+            Route::DestinationEmulates => Some(ThroughputExpectation {
+                min_percent: 20,
+                max_percent: 70,
+                basis: "the destination emulates this architecture itself; the range is wide \
+                        because it spans Prism's x86 and x86-64 paths and their cache warming",
+            }),
             Route::Refused => None,
         }
     }
@@ -168,6 +191,11 @@ impl Route {
             Route::Wow64 => {
                 "Translate this 32-bit image and run it inside a WOW64 compatibility \
                  environment."
+            }
+            Route::DestinationEmulates => {
+                "This image will run, because the destination emulates its architecture \
+                 itself. Every instruction is translated, so it is not emulation-free: \
+                 rebuilding it for Arm64 is what removes that cost."
             }
             Route::Refused => {
                 "Do not execute. No route on this host can run this image correctly, and \

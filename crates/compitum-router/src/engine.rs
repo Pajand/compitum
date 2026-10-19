@@ -35,6 +35,7 @@ use compitum_pe::{AbiFamily, PeImage};
 use crate::plan::Plan;
 use crate::reason::{Reason, ReasonCode, Reasons};
 use crate::route::{Backend, BackendSet, Route};
+use crate::target::MigrationTarget;
 
 /// Everything the engine needs to reach a decision.
 ///
@@ -56,6 +57,16 @@ pub struct Request {
     /// Set when the operator asked for a headless-only evaluation, so that a display
     /// requirement becomes a blocker rather than a caution.
     pub headless_only: bool,
+    /// Where the software is going.
+    ///
+    /// A route is only meaningful relative to a destination: the same binary can be native on
+    /// one target and need a translator on another. Before this existed, the destination was
+    /// implicitly "this machine with whatever was installed here", which is a compatibility
+    /// check rather than a migration analysis.
+    ///
+    /// Defaults to [`MigrationTarget::LinuxWithWine`], so every caller that does not state a
+    /// target keeps the behaviour it already had.
+    pub target: MigrationTarget,
 }
 
 /// The subject of a routing decision.
@@ -82,6 +93,7 @@ impl Request {
             backends,
             requirements: Vec::new(),
             headless_only: false,
+            target: MigrationTarget::default(),
         }
     }
 
@@ -97,7 +109,15 @@ impl Request {
             backends: BackendSet::none(),
             requirements: Vec::new(),
             headless_only: false,
+            target: MigrationTarget::default(),
         }
+    }
+
+    /// States where the software is going.
+    #[must_use]
+    pub fn with_target(mut self, target: MigrationTarget) -> Self {
+        self.target = target;
+        self
     }
 
     /// Attaches instruction-level requirements discovered by scanning.
@@ -178,6 +198,34 @@ pub fn decide(request: &Request) -> Plan {
         );
     }
 
+    // ---- Managed code: the machine type must not decide the route -----------
+    //
+    // A .NET assembly records the platform it was BUILT for, and the CLR compiles its IL to
+    // the host's own instructions when it loads. So a managed image marked x86-64 or even
+    // 32-bit x86 becomes native ARM64 code by the time any of it runs, and judging it by its
+    // recorded machine type is exactly the mistake the note above already warns about.
+    //
+    // This was a real defect: `managed-dotnet.exe` came out REFUSED with "no 32-bit x86
+    // translator is installed", which is doubly wrong. The image needs no translator at all,
+    // and the answer a migration cares about — "your oldest, ugliest .NET component is
+    // already fine on Arm64" — was the opposite of what the tool said.
+    //
+    // The route is Native because after JIT compilation that is literally what executes. The
+    // confidence stays honest via the `subject_is_managed_code` reason already recorded above,
+    // which says the machine field describes the build host rather than the code.
+    if image.is_managed() {
+        reasons.add_detail(
+            ReasonCode::ArchitectureNative,
+            "managed code: the CLR compiles this assembly's IL to the host's own instructions \
+             at load time, so its recorded machine type does not determine what executes",
+        );
+        if !isa_satisfied(host, &request.requirements, &mut reasons) {
+            return Plan::new(Route::Refused, reasons, subject_label);
+        }
+        annotate_cautions(image, host, request, &mut reasons);
+        return Plan::new(Route::Native, reasons, subject_label);
+    }
+
     let family = image.family();
     let route = select_route(
         family,
@@ -231,28 +279,53 @@ fn select_route(
 
         // ---- ARM64EC: the hybrid case this project exists for -----------------
         AbiFamily::Arm64Hybrid => {
-            reasons.add_detail(
-                ReasonCode::ArchitectureHybrid,
-                "the AArch64 functions run natively; the embedded x86-64 functions require \
-                 a translator",
-            );
+            reasons.add(ReasonCode::ArchitectureHybrid);
             if !isa_satisfied(host, requirements, reasons) {
                 return Route::Refused;
             }
-            // FEX provides the ARM64EC-compatible mode that allows a translator to coexist
-            // with native code in one process. Box64 does not, so a host with only Box64
-            // cannot take this route correctly.
-            if request.backends.contains(Backend::Fex) {
-                reasons.add(ReasonCode::BackendPresent);
-                Route::FexPartial
-            } else {
-                reasons.add_detail(
-                    ReasonCode::BackendAbsent,
-                    "an ARM64EC image needs FEX specifically, because its translator must \
-                     coexist with native code in the same process; Box64 does not offer \
-                     that mode",
-                );
-                Route::Refused
+            // THE TARGET DECIDES THIS, and it was the single biggest error in this router.
+            //
+            // On Windows on Arm, ARM64EC *is* the native ABI: Microsoft designed it so that
+            // AArch64 and x86-64 code share a process, and the operating system implements the
+            // boundary. Reporting it as "hybrid, FEX required, 70-90% of native" was correct
+            // for Linux and wrong for the platform a migration is actually headed to — and it
+            // understated the product's own best case by 10-30%.
+            let route = request.target.arm64ec_route();
+            match route {
+                Route::Native => {
+                    reasons.add_detail(
+                        ReasonCode::TargetProvidesTranslation,
+                        format!(
+                            "on {}, ARM64EC is the native ABI: the operating system implements \
+                             the AArch64/x86-64 boundary, so no translator is loaded and every \
+                             instruction runs at hardware speed",
+                            request.target.id()
+                        ),
+                    );
+                    Route::Native
+                }
+                _ => {
+                    reasons.add_detail(
+                        ReasonCode::ArchitectureHybrid,
+                        "the AArch64 functions run natively; the embedded x86-64 functions \
+                         require a translator",
+                    );
+                    // FEX provides the ARM64EC-compatible mode that allows a translator to
+                    // coexist with native code in one process. Box64 does not, so a host with
+                    // only Box64 cannot take this route correctly.
+                    if request.backends.contains(Backend::Fex) {
+                        reasons.add(ReasonCode::BackendPresent);
+                        Route::FexPartial
+                    } else {
+                        reasons.add_detail(
+                            ReasonCode::BackendAbsent,
+                            "an ARM64EC image needs FEX specifically, because its translator \
+                             must coexist with native code in the same process; Box64 does not \
+                             offer that mode",
+                        );
+                        Route::Refused
+                    }
+                }
             }
         }
 
@@ -261,6 +334,26 @@ fn select_route(
             reasons.add(ReasonCode::ArchitectureRequiresTranslation);
             if !isa_satisfied(host, requirements, reasons) {
                 return Route::Refused;
+            }
+            // A destination that emulates this architecture itself changes the answer
+            // completely, and it is the answer a migration cares about most.
+            //
+            // Windows 11 on Arm ships Prism and runs x86-64 with no additional component, so
+            // such an image does work on the destination. Saying "REFUSED — install Box64"
+            // was doubly wrong: Box64 does not exist on Windows, and the application runs
+            // anyway. What the customer actually needs to hear is that it works and is
+            // therefore still paying for translation.
+            if request.target.emulates_x86_64_natively() {
+                reasons.add_detail(
+                    ReasonCode::TargetProvidesTranslation,
+                    format!(
+                        "{} emulates x86-64 itself, so this image runs without anything being \
+                         installed — but every instruction is translated, and rebuilding for \
+                         Arm64 is what removes that cost",
+                        request.target.id()
+                    ),
+                );
+                return Route::DestinationEmulates;
             }
             if request.backends.contains(Backend::Box64) {
                 reasons.add(ReasonCode::BackendPresent);
@@ -282,6 +375,21 @@ fn select_route(
             reasons.add(ReasonCode::ArchitectureRequiresWow64);
             if !isa_satisfied(host, requirements, reasons) {
                 return Route::Refused;
+            }
+            // The same correction as x86-64, and it matters more here: Windows on Arm has
+            // emulated 32-bit x86 since the first release, through WOW64 plus the emulator.
+            // No separate component, and certainly not Box86, which is a Linux program.
+            if request.target.emulates_x86_64_natively() {
+                reasons.add_detail(
+                    ReasonCode::TargetProvidesTranslation,
+                    format!(
+                        "{} runs 32-bit x86 through WOW64 and its own emulator, so this image \
+                         runs without anything being installed — rebuilding for Arm64 is what \
+                         removes the translation cost",
+                        request.target.id()
+                    ),
+                );
+                return Route::DestinationEmulates;
             }
             if request.backends.contains(Backend::Box86) {
                 reasons.add(ReasonCode::BackendPresent);
@@ -466,11 +574,68 @@ fn annotate_cautions(
         );
     }
 
+    // ---- Kernel-mode drivers -----------------------------------------------
+    //
+    // Found by scanning 747 genuine binaries from a real Wine distribution: sixteen kernel
+    // drivers came out as clean native ports. Every architectural statement about them was
+    // true — on an Arm64 build a driver is pure AArch64 — and all of it missed the point,
+    // because a user-mode compatibility layer cannot load a kernel driver at all.
+    //
+    // The answer depends on the destination and on the driver's own architecture, and both
+    // halves matter:
+    //
+    //   * an Arm64 driver on Windows on Arm is ordinary native kernel code and loads
+    //     normally. Telling that customer to rewrite it would waste real money;
+    //   * an x86 or x86-64 driver cannot run anywhere, because Microsoft's emulator covers
+    //     user-mode code only and a kernel component must be built for Arm64.
+    //
+    // `is_fully_native_on_arm64` is the driver's architecture: a pure Arm64 image is native,
+    // a hybrid one contains translated code and therefore cannot be a kernel component.
+    if image.is_kernel_driver() {
+        let arm64 = image.family().is_fully_native_on_arm64();
+        if request.target.loads_kernel_drivers(arm64) {
+            reasons.add_detail(
+                ReasonCode::KernelDriverNative,
+                format!(
+                    "this is a kernel-mode driver built for Arm64, so {} loads it as native \
+                     kernel code; no port is needed",
+                    request.target.id()
+                ),
+            );
+        } else {
+            reasons.add_detail(
+                ReasonCode::KernelDriverEmulated,
+                format!(
+                    "this is a kernel-mode driver and {} cannot load it: emulation covers \
+                     user-mode code only, so a kernel component must be rebuilt for Arm64",
+                    request.target.id()
+                ),
+            );
+        }
+    }
+
     // ---- System-call layer -------------------------------------------------
-    // No Windows image can run without NT syscall translation, including fully native
-    // ARM64 ones. This is easy to forget because the architecture analysis is the
-    // interesting part.
-    if request.backends.contains(Backend::Wine) {
+    //
+    // No Windows image can run without an NT syscall layer, including fully native ARM64
+    // ones. But WHO supplies it depends entirely on the destination, and this annotation used
+    // to assume the destination was always "this Linux machine":
+    //
+    //   * On Windows on Arm the operating system supplies it. Wine is not involved and its
+    //     absence is not a defect — reporting it as one made a pure ARM64 binary that runs
+    //     natively on Windows come out as REFUSED, which is the single clearest symptom of the
+    //     router having no concept of a destination.
+    //   * On Linux it is Wine, a package the operator must install, and its absence genuinely
+    //     does block every Windows image.
+    if request.target.supplies_syscall_layer() {
+        reasons.add_detail(
+            ReasonCode::TargetSuppliesSyscallLayer,
+            format!(
+                "{} supplies the NT system-call layer itself, so no compatibility layer is \
+                 needed for it",
+                request.target.id()
+            ),
+        );
+    } else if request.backends.contains(Backend::Wine) {
         reasons.add(ReasonCode::SyscallLayerPresent);
     } else {
         reasons.add_detail(

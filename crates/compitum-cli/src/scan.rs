@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 
 use compitum_isa::HostProfile;
 use compitum_pe::PeImage;
-use compitum_router::{decide, BackendSet, Plan, Request};
+use compitum_router::{decide, BackendSet, MigrationTarget, Plan, Request};
 
 /// How deep the walk descends before it stops.
 ///
@@ -316,8 +316,20 @@ pub struct ScanReport {
 /// `path` may be a single file, in which case the result has one entry — so `scan` is a
 /// superset of `verify` rather than a separate vocabulary to learn.
 #[must_use]
-pub fn scan_path(path: &Path, host: &HostProfile, backends: BackendSet) -> ScanReport {
-    scan_path_with_limits(path, host, backends, DEFAULT_MAX_DEPTH, DEFAULT_MAX_FILES)
+pub fn scan_path(
+    path: &Path,
+    host: &HostProfile,
+    backends: BackendSet,
+    target: MigrationTarget,
+) -> ScanReport {
+    scan_path_with_limits(
+        path,
+        host,
+        backends,
+        target,
+        DEFAULT_MAX_DEPTH,
+        DEFAULT_MAX_FILES,
+    )
 }
 
 /// [`scan_path`] with explicit limits, so the guards can be tested at their boundaries.
@@ -326,6 +338,7 @@ pub fn scan_path_with_limits(
     path: &Path,
     host: &HostProfile,
     backends: BackendSet,
+    target: MigrationTarget,
     max_depth: usize,
     max_files: usize,
 ) -> ScanReport {
@@ -352,8 +365,14 @@ pub fn scan_path_with_limits(
 
     let root_display = path.display().to_string();
     let mut files = Vec::with_capacity(targets.len());
-    for target in &targets {
-        files.push(classify_file(target, &root_display, host, backends));
+    for candidate in &targets {
+        files.push(classify_file(
+            candidate,
+            &root_display,
+            host,
+            backends,
+            target,
+        ));
     }
 
     let counts = count(&files);
@@ -438,7 +457,13 @@ fn collect(
 }
 
 /// Reads one file and classifies it.
-fn classify_file(path: &Path, root: &str, host: &HostProfile, backends: BackendSet) -> ScannedFile {
+fn classify_file(
+    path: &Path,
+    root: &str,
+    host: &HostProfile,
+    backends: BackendSet,
+    target: MigrationTarget,
+) -> ScannedFile {
     let display = display_path(path, root);
 
     let metadata = match std::fs::metadata(path) {
@@ -500,15 +525,22 @@ fn classify_file(path: &Path, root: &str, host: &HostProfile, backends: BackendS
 
     ScannedFile {
         path: display,
-        kind: ScanKind::Routed(Box::new(route(&bytes, image, host, backends))),
+        kind: ScanKind::Routed(Box::new(route(&bytes, image, host, backends, target))),
     }
 }
 
 /// Decides the route for one parsed image.
-fn route(bytes: &[u8], image: PeImage, host: &HostProfile, backends: BackendSet) -> RoutedFile {
+fn route(
+    bytes: &[u8],
+    image: PeImage,
+    host: &HostProfile,
+    backends: BackendSet,
+    target: MigrationTarget,
+) -> RoutedFile {
     let scan = compitum_pe::scan_image(bytes, &image);
     let request = Request::new(image.clone(), host.clone(), backends)
-        .with_requirements(scan.requirements.clone());
+        .with_requirements(scan.requirements.clone())
+        .with_target(target);
     let plan: Plan = decide(&request);
 
     let blockers: Vec<String> = plan
@@ -1098,7 +1130,12 @@ mod tests {
         // An integration test against committed fixtures produced by a real toolchain, so the
         // batch path is exercised on genuine images rather than only on synthetic ones.
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../compitum-pe/tests/corpus");
-        let report = scan_path(&corpus, &host(), BackendSet::all());
+        let report = scan_path(
+            &corpus,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+        );
 
         assert!(
             !report.files.is_empty(),
@@ -1121,7 +1158,12 @@ mod tests {
     #[test]
     fn results_are_sorted_so_a_report_can_be_diffed() {
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../compitum-pe/tests/corpus");
-        let report = scan_path(&corpus, &host(), BackendSet::all());
+        let report = scan_path(
+            &corpus,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+        );
         let paths: Vec<&String> = report.files.iter().map(|f| &f.path).collect();
         let mut sorted = paths.clone();
         sorted.sort();
@@ -1133,7 +1175,14 @@ mod tests {
         // The guard must work, and truncation must be visible. A report that silently covered
         // a subset would understate the work a migration needs.
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../compitum-pe/tests/corpus");
-        let report = scan_path_with_limits(&corpus, &host(), BackendSet::all(), 0, 1000);
+        let report = scan_path_with_limits(
+            &corpus,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+            0,
+            1000,
+        );
 
         // Depth 0 still lists the corpus directory's own files, so the assertion is about the
         // reason being recorded when the walk does stop, not about a specific count.
@@ -1146,7 +1195,14 @@ mod tests {
     #[test]
     fn a_file_limit_truncates_at_the_boundary() {
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../compitum-pe/tests/corpus");
-        let report = scan_path_with_limits(&corpus, &host(), BackendSet::all(), 12, 2);
+        let report = scan_path_with_limits(
+            &corpus,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+            12,
+            2,
+        );
         assert_eq!(report.counts.files_seen, 2, "exactly the limit is examined");
         assert!(report.truncated, "stopping early must be reported");
         assert!(report
@@ -1159,7 +1215,12 @@ mod tests {
     fn a_single_file_is_accepted_like_a_verify_subject() {
         let file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../compitum-pe/tests/corpus/real-console-4k.exe");
-        let report = scan_path(&file, &host(), BackendSet::all());
+        let report = scan_path(
+            &file,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+        );
         assert_eq!(report.files.len(), 1);
         assert_eq!(report.counts.routed, 1);
         assert!(
@@ -1172,7 +1233,12 @@ mod tests {
     fn a_non_image_file_is_not_a_failure() {
         let file =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../compitum-pe/tests/corpus/manifest.json");
-        let report = scan_path(&file, &host(), BackendSet::all());
+        let report = scan_path(
+            &file,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+        );
         assert_eq!(report.counts.not_pe, 1);
         assert_eq!(report.counts.malformed, 0);
         assert_eq!(report.counts.unreadable, 0);
@@ -1185,6 +1251,7 @@ mod tests {
             Path::new("/definitely/not/here.exe"),
             &host(),
             BackendSet::all(),
+            MigrationTarget::default(),
         );
         assert_eq!(report.counts.unreadable, 1);
         assert_eq!(report.counts.routed, 0);
@@ -1229,7 +1296,12 @@ mod tests {
             "the fixture must be unparseable, or this test is about a healthy image"
         );
 
-        let report = scan_path(&path, &host(), BackendSet::all());
+        let report = scan_path(
+            &path,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+        );
         assert_eq!(report.counts.malformed, 1, "{:?}", report.files);
         assert_eq!(report.counts.not_pe, 0);
         assert!(
@@ -1255,7 +1327,12 @@ mod tests {
             "a file below the DOS header minimum is not a PE candidate"
         );
 
-        let report = scan_path(&path, &host(), BackendSet::all());
+        let report = scan_path(
+            &path,
+            &host(),
+            BackendSet::all(),
+            MigrationTarget::default(),
+        );
         assert_eq!(report.counts.not_pe, 1, "{:?}", report.files);
         assert_eq!(report.counts.malformed, 0);
 
