@@ -333,14 +333,17 @@ pub fn escape(text: &str) -> String {
 ///
 /// Returns `None` when the denominator is zero. "0 of 0 already done" is not 0% and it is not
 /// 100% — it is a question that was not asked, and a report must not answer it.
+///
+/// `checked_div` rather than a guard plus a division: clippy treats the two as the same
+/// operation written twice, and it is right — a guard and the arithmetic below it can drift
+/// apart, while a single expression cannot.
 #[must_use]
 pub fn percent(part: usize, whole: usize) -> Option<u32> {
-    if whole == 0 {
-        return None;
-    }
     // Integer arithmetic; a migration report does not need a fraction of a percent and rounding
     // here avoids a float that could print as 33.000000000000004.
-    Some(((part.saturating_mul(100)) / whole) as u32)
+    part.saturating_mul(100)
+        .checked_div(whole)
+        .map(|value| value as u32)
 }
 
 /// Renders a complete, self-contained HTML report.
@@ -499,13 +502,19 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
     }
 
     // Proportional bar, built from percentages rather than from pixels so it scales and prints.
-    if total_in_scope > 0 {
+    //
+    // The denominator is checked with `checked_div` rather than an `if` on the same value: clippy
+    // flags a manual guard followed by a division as the same operation written twice, and it is
+    // right — the guard and the arithmetic can drift apart. One expression cannot.
+    if let Some(total) = std::num::NonZeroUsize::new(total_in_scope) {
         doc.push_str("<div class=\"bar\" role=\"img\" aria-label=\"Distribution of actions\">\n");
         for (action, items) in &groups {
             if items.is_empty() {
                 continue;
             }
-            let width = (items.len() * 1000) / total_in_scope;
+            let Some(width) = (items.len() * 1000).checked_div(total.get()) else {
+                continue;
+            };
             if width == 0 {
                 continue;
             }
