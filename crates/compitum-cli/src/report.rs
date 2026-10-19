@@ -352,57 +352,96 @@ pub fn percent(part: usize, whole: usize) -> Option<u32> {
 pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> String {
     let counts = action_counts(report);
     let total_in_scope = in_scope(report);
-    let ready = counts
-        .iter()
-        .find(|(action, _)| *action == Action::Ready)
-        .map(|(_, count)| *count)
-        .unwrap_or(0);
-    let rebuild = counts
-        .iter()
-        .find(|(action, _)| *action == Action::Rebuild)
-        .map(|(_, count)| *count)
-        .unwrap_or(0);
-    let rewrite = counts
-        .iter()
-        .find(|(action, _)| *action == Action::Rewrite)
-        .map(|(_, count)| *count)
-        .unwrap_or(0);
-    let unknown = counts
-        .iter()
-        .find(|(action, _)| *action == Action::Unknown)
-        .map(|(_, count)| *count)
-        .unwrap_or(0);
+    let judged = determined(report);
 
-    let mut doc = String::with_capacity(16_384);
+    let count_of = |want: Action| -> usize {
+        counts
+            .iter()
+            .find(|(action, _)| *action == want)
+            .map(|(_, count)| *count)
+            .unwrap_or(0)
+    };
+    let ready = count_of(Action::Ready);
+    let rebuild = count_of(Action::Rebuild);
+    let rewrite = count_of(Action::Rewrite);
+    let unknown = count_of(Action::Unknown);
+    let unusable = count_of(Action::Unusable);
+    let not_applicable = count_of(Action::NotApplicable);
+
+    // Files grouped once, so the summary, the bar and the detail sections cannot disagree.
+    let mut groups: Vec<(Action, Vec<&ScannedFile>)> = Vec::new();
+    for action in Action::ALL {
+        let items: Vec<&ScannedFile> = report
+            .files
+            .iter()
+            .filter(|file| action_for(file, report.target) == *action)
+            .collect();
+        groups.push((*action, items));
+    }
+    let readiness = percent(ready, judged);
+    let mut doc = String::with_capacity(65_536);
 
     doc.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
     doc.push_str("<meta charset=\"utf-8\">\n");
     doc.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    doc.push_str(&format!(
-        "<title>Arm64 migration assessment — {}</title>\n",
+    let _ = writeln!(
+        doc,
+        "<title>Arm64 migration assessment — {}</title>",
         escape(&report.root)
-    ));
-    doc.push_str(&format!(
-        "<meta name=\"generator\" content=\"COMPITUM {}\">\n",
+    );
+    let _ = writeln!(
+        doc,
+        "<meta name=\"generator\" content=\"COMPITUM {}\">",
         escape(version)
-    ));
-    doc.push_str(&format!(
-        "<meta name=\"description\" content=\"Readiness of {} file(s) under {} for {}\">\n",
+    );
+    let _ = writeln!(
+        doc,
+        "<meta name=\"description\" content=\"Readiness of {} file(s) under {} for {}\">",
         report.files.len(),
         escape(&report.root),
         escape(report.target.id())
-    ));
+    );
     doc.push_str(STYLE);
-    doc.push_str("</head>\n<body>\n<main>\n");
+    doc.push_str("</head>\n<body>\n");
+
+    // ---- Side navigation -------------------------------------------------
+    //
+    // A report over several hundred files has to be navigable before it can be readable. The
+    // link list is built from the sections that actually exist, so it never offers a jump to an
+    // empty heading — a table of contents that lies is worse than none.
+    doc.push_str("<nav class=\"side\" aria-label=\"Sections\">\n");
+    let _ = writeln!(doc, "<p class=\"navtitle\">{}</p>", escape(&report.root));
+    doc.push_str("<ol>\n");
+    for (label, anchor) in [
+        ("Overview", "overview"),
+        ("Readiness", "readiness"),
+        ("Actions", "actions"),
+        ("Limitations", "limits"),
+    ] {
+        let _ = writeln!(doc, "<li><a href=\"#{anchor}\">{label}</a></li>");
+    }
+    for (action, items) in &groups {
+        if items.is_empty() || *action == Action::NotApplicable {
+            continue;
+        }
+        let _ = writeln!(
+            doc,
+            "<li><a href=\"#h-{}\">{} <span class=\"navcount\">{}</span></a></li>",
+            action.id(),
+            escape(action.title()),
+            items.len()
+        );
+    }
+    doc.push_str("</ol>\n</nav>\n<main>\n");
 
     // ---- Header ----------------------------------------------------------
-    doc.push_str("<header>\n");
+    doc.push_str("<header id=\"overview\">\n");
     doc.push_str("<p class=\"eyebrow\">Arm64 migration assessment</p>\n");
-    doc.push_str(&format!("<h1>{}</h1>\n", escape(&report.root)));
+    let _ = writeln!(doc, "<h1>{}</h1>", escape(&report.root));
     doc.push_str("<dl class=\"meta\">\n");
     let _ = writeln!(
         doc,
-        "<div><dt>Destination</dt><dd>{} <span class=\"muted\">({})</span></dd></div>",
+        "<div><dt>Destination</dt><dd><code>{}</code><span class=\"muted\">{}</span></dd></div>",
         escape(report.target.id()),
         escape(report.target.description())
     );
@@ -418,75 +457,130 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
     );
     let _ = writeln!(
         doc,
-        "<div><dt>Files examined</dt><dd>{}</dd></div>",
-        report.files.len()
+        "<div><dt>Examined</dt><dd>{} file(s) · {} Windows image(s)</dd></div>",
+        report.files.len(),
+        total_in_scope
     );
     doc.push_str("</dl>\n</header>\n");
 
-    // ---- Headline --------------------------------------------------------
-    doc.push_str("<section class=\"headline\" aria-labelledby=\"headline-h\">\n");
-    doc.push_str("<h2 id=\"headline-h\">Readiness</h2>\n");
-    match percent(ready, determined(report)) {
+    // ---- Readiness -------------------------------------------------------
+    doc.push_str(
+        "<section class=\"readiness\" id=\"readiness\" aria-labelledby=\"readiness-h\">\n",
+    );
+    doc.push_str("<h2 id=\"readiness-h\">Readiness</h2>\n");
+    match readiness {
         Some(pct) => {
+            doc.push_str("<div class=\"gauge\">\n");
             let _ = writeln!(
                 doc,
-                "<p class=\"big\"><strong>{pct}%</strong> <span class=\"of\">of judged files need no work</span></p>\n\
-                 <p class=\"sub\">{} of {} judged file(s) already run natively on the destination.</p>",
-                ready,
-                determined(report)
+                "<p class=\"figure\"><strong>{pct}</strong><span class=\"pct\">%</span></p>"
+            );
+            let _ = writeln!(
+                doc,
+                "<p class=\"caption\">of judged file(s) need no work</p>"
+            );
+            doc.push_str("</div>\n");
+            let _ = writeln!(
+                doc,
+                "<p class=\"lede\">{} of {} judged file(s) already run natively on the \
+                 destination — no translation, no emulation, nothing to port.</p>",
+                ready, judged
             );
         }
         None => {
+            doc.push_str("<div class=\"gauge\">\n<p class=\"figure unavailable\">—</p>\n");
+            doc.push_str("<p class=\"caption\">not determinable</p>\n</div>\n");
             doc.push_str(
-                "<p class=\"big unavailable\">Not determinable</p>\n\
-                 <p class=\"sub\">No Windows image in this tree was judged, so readiness cannot be stated. \
-                 See “Limitations” below.</p>\n",
+                "<p class=\"lede\">No Windows image in this tree could be judged, so readiness \
+                 cannot be stated. This is an absence of evidence, not a finding: see \
+                 “Limitations” for what was missing.</p>\n",
             );
         }
     }
+
+    // Proportional bar, built from percentages rather than from pixels so it scales and prints.
+    if total_in_scope > 0 {
+        doc.push_str("<div class=\"bar\" role=\"img\" aria-label=\"Distribution of actions\">\n");
+        for (action, items) in &groups {
+            if items.is_empty() {
+                continue;
+            }
+            let width = (items.len() * 1000) / total_in_scope;
+            if width == 0 {
+                continue;
+            }
+            let _ = writeln!(
+                doc,
+                "<span class=\"seg s-{}\" style=\"width:{}.{}%\" title=\"{}: {}\"></span>",
+                action.id(),
+                width / 10,
+                width % 10,
+                escape(action.title()),
+                items.len()
+            );
+        }
+        doc.push_str("</div>\n");
+    }
     doc.push_str("</section>\n");
 
-    // ---- Scorecard -------------------------------------------------------
-    doc.push_str(
-        "<section aria-labelledby=\"score-h\">\n<h2 id=\"score-h\">What has to happen</h2>\n",
-    );
-    doc.push_str("<table class=\"score\">\n<thead><tr><th scope=\"col\">Action</th><th scope=\"col\" class=\"num\">Files</th><th scope=\"col\">Meaning</th></tr></thead>\n<tbody>\n");
-    for (action, count) in &counts {
-        if *action == Action::NotApplicable || *count == 0 {
+    // ---- Actions ---------------------------------------------------------
+    doc.push_str("<section id=\"actions\" aria-labelledby=\"actions-h\">\n");
+    doc.push_str("<h2 id=\"actions-h\">What has to happen</h2>\n");
+    doc.push_str("<div class=\"cards\">\n");
+    for (action, items) in &groups {
+        if *action == Action::NotApplicable || items.is_empty() {
+            continue;
+        }
+        let share = percent(items.len(), total_in_scope).unwrap_or(0);
+        let _ = writeln!(
+            doc,
+            "<a class=\"card c-{}\" href=\"#h-{}\">\n\
+             <span class=\"cardlabel\">{}</span>\n\
+             <span class=\"cardnum\">{}</span>\n\
+             <span class=\"cardshare\">{}% of images</span>\n\
+             </a>",
+            action.id(),
+            action.id(),
+            escape(action.title()),
+            items.len(),
+            share
+        );
+    }
+    doc.push_str("</div>\n");
+
+    // Detail table of the actions themselves, with the meaning spelled out once.
+    doc.push_str("<table class=\"score\">\n<thead><tr><th scope=\"col\">Action</th>\
+                  <th scope=\"col\" class=\"num\">Files</th><th scope=\"col\">What it means</th></tr></thead>\n<tbody>\n");
+    for (action, items) in &groups {
+        if *action == Action::NotApplicable || items.is_empty() {
             continue;
         }
         let _ = writeln!(
             doc,
-            "<tr class=\"row-{}\"><th scope=\"row\"><span class=\"badge b-{}\">{}</span></th>\
+            "<tr><th scope=\"row\"><span class=\"badge b-{}\">{}</span></th>\
              <td class=\"num\">{}</td><td>{}</td></tr>",
             action.id(),
-            action.id(),
             escape(action.title()),
-            count,
+            items.len(),
             escape(action.explanation())
         );
     }
-    // Not-applicable is summarised rather than listed: it is a non-finding.
-    if let Some((_, count)) = counts
-        .iter()
-        .find(|(action, _)| *action == Action::NotApplicable)
-    {
-        if *count > 0 {
-            let _ = writeln!(
-                doc,
-                "<tr class=\"row-muted\"><th scope=\"row\"><span class=\"badge b-na\">Not a Windows image</span></th>\
-                 <td class=\"num\">{}</td><td>{}</td></tr>",
-                count,
-                escape(Action::NotApplicable.explanation())
-            );
-        }
+    if not_applicable > 0 {
+        let _ = writeln!(
+            doc,
+            "<tr class=\"row-muted\"><th scope=\"row\"><span class=\"badge b-na\">{}</span></th>\
+             <td class=\"num\">{}</td><td>{}</td></tr>",
+            escape(Action::NotApplicable.title()),
+            not_applicable,
+            escape(Action::NotApplicable.explanation())
+        );
     }
     doc.push_str("</tbody>\n</table>\n</section>\n");
 
     // ---- Limitations before detail ---------------------------------------
     //
-    // Deliberately placed above the file list. A reader who stops scrolling has to have seen
-    // what the report could not establish; putting it at the bottom is how caveats get skipped.
+    // Deliberately above the file lists. A reader who stops scrolling has to have seen what the
+    // report could not establish; caveats below several hundred rows are caveats skipped.
     let mut limitations: Vec<String> = Vec::new();
     if report.truncated {
         limitations.push(format!(
@@ -502,18 +596,15 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
     if unknown > 0 {
         limitations.push(format!(
             "{unknown} file(s) could not be judged because a component needed to answer was \
-             absent where this report was produced. Their verdict is unknown, not negative."
+             absent where this report was produced. Their verdict is unknown, not negative — a \
+             refusal caused by the audit machine says nothing about the software."
         ));
     }
-    let unreadable = counts
-        .iter()
-        .find(|(action, _)| *action == Action::Unusable)
-        .map(|(_, count)| *count)
-        .unwrap_or(0);
-    if unreadable > 0 {
+    if unusable > 0 {
         limitations.push(format!(
-            "{unreadable} Windows image(s) could not be parsed, so they are reported as unusable \
-             rather than judged."
+            "{unusable} Windows image(s) could not be parsed, so they are reported as unusable \
+             rather than judged. They may be corrupt, or use a layout this analyser does not \
+             understand."
         ));
     }
     limitations.push(
@@ -522,38 +613,52 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
          held in an executable section."
             .to_owned(),
     );
+    limitations.push(
+        "Instruction-set requirements are derived only for images that can contain AArch64 \
+         code. An x86 or x86-64 image is not searched for AArch64 encodings, because an \
+         instruction encoding is meaningless outside its own instruction set."
+            .to_owned(),
+    );
     if report.target == MigrationTarget::LinuxWithWine {
         limitations.push(
-            "This assessment was made for Linux with Wine, not for Windows on Arm. Pass \
-             --target windows-on-arm for the destination a migration usually has in mind."
+            "This assessment was made for <strong>Linux with Wine</strong>, not for Windows on \
+             Arm. Pass <code>--target windows-on-arm</code> for the destination a migration \
+             usually has in mind."
                 .to_owned(),
         );
     }
 
-    doc.push_str("<section class=\"limits\" aria-labelledby=\"limits-h\">\n<h2 id=\"limits-h\">Limitations</h2>\n<ul>\n");
+    doc.push_str("<section class=\"limits\" id=\"limits\" aria-labelledby=\"limits-h\">\n");
+    doc.push_str("<h2 id=\"limits-h\">Limitations</h2>\n<ul>\n");
     for limitation in &limitations {
         let _ = writeln!(doc, "<li>{limitation}</li>");
     }
     doc.push_str("</ul>\n</section>\n");
 
-    // ---- Per-action detail ------------------------------------------------
-    for action in Action::ALL {
-        if *action == Action::NotApplicable {
+    // ---- Detail, one collapsible section per action ----------------------
+    //
+    // `<details>` rather than scripted accordions: it works with no JavaScript at all, prints
+    // opened or closed as the reader left it, and is operable by keyboard and screen reader
+    // without any code on our side. A migration report over hundreds of files must not hand the
+    // reader a wall of rows, and must not require JavaScript to avoid one.
+    for (action, items) in &groups {
+        if items.is_empty() || *action == Action::NotApplicable {
             continue;
         }
-        let items: Vec<&ScannedFile> = report
-            .files
-            .iter()
-            .filter(|file| action_for(file, report.target) == *action)
-            .collect();
-        if items.is_empty() {
-            continue;
-        }
+        // "Ready" and "not determined" start collapsed because they are the bulk or the
+        // non-finding; the two that require work start open because those are the reason
+        // anybody commissioned the report.
+        let open = matches!(action, Action::Rebuild | Action::Rewrite);
 
         let _ = writeln!(
             doc,
-            "<section class=\"detail\" aria-labelledby=\"h-{}\">\n<h2 id=\"h-{}\">{} <span class=\"count\">({})</span></h2>\n<p class=\"lede\">{}</p>",
+            "<section class=\"detail\" id=\"h-{}\">\n\
+             <details{}>\n<summary>\n\
+             <span class=\"badge b-{}\">{}</span>\n\
+             <span class=\"sumcount\">{} file(s)</span>\n\
+             </summary>\n<p class=\"lede\">{}</p>",
             action.id(),
+            if open { " open" } else { "" },
             action.id(),
             escape(action.title()),
             items.len(),
@@ -561,22 +666,38 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
         );
 
         doc.push_str("<table class=\"files\">\n<thead><tr>");
-        doc.push_str("<th scope=\"col\">File</th><th scope=\"col\">Architecture</th><th scope=\"col\">Route</th><th scope=\"col\">Why</th>");
+        doc.push_str(
+            "<th scope=\"col\">File</th><th scope=\"col\">Architecture</th>\
+             <th scope=\"col\">Route</th><th scope=\"col\" class=\"num\">Confidence</th>\
+             <th scope=\"col\">Why</th>",
+        );
         doc.push_str("</tr></thead>\n<tbody>\n");
-        for file in &items {
-            let (family, route, why) = match &file.kind {
+        for file in items {
+            let (family, route, confidence, why) = match &file.kind {
                 ScanKind::Routed(routed) => (
                     routed.abi_family.clone(),
                     routed.route.clone(),
+                    format!("{}%", routed.confidence_permille / 10),
                     routed.headline.clone(),
                 ),
-                ScanKind::Malformed { message } => {
-                    ("—".to_owned(), "malformed".to_owned(), message.clone())
-                }
-                ScanKind::Unreadable { message } => {
-                    ("—".to_owned(), "unreadable".to_owned(), message.clone())
-                }
-                ScanKind::NotPe => ("—".to_owned(), "not-pe".to_owned(), String::new()),
+                ScanKind::Malformed { message } => (
+                    "—".to_owned(),
+                    "malformed".to_owned(),
+                    "—".to_owned(),
+                    message.clone(),
+                ),
+                ScanKind::Unreadable { message } => (
+                    "—".to_owned(),
+                    "unreadable".to_owned(),
+                    "—".to_owned(),
+                    message.clone(),
+                ),
+                ScanKind::NotPe => (
+                    "—".to_owned(),
+                    "not-pe".to_owned(),
+                    "—".to_owned(),
+                    String::new(),
+                ),
             };
             let driver = match &file.kind {
                 ScanKind::Routed(routed) if routed.is_kernel_driver => {
@@ -586,15 +707,17 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
             };
             let _ = writeln!(
                 doc,
-                "<tr><td class=\"path\"><code>{}</code>{}</td><td>{}</td><td><code>{}</code></td><td class=\"why\">{}</td></tr>",
+                "<tr><td class=\"path\"><code>{}</code>{}</td><td>{}</td><td><code>{}</code></td>\
+                 <td class=\"num\">{}</td><td class=\"why\">{}</td></tr>",
                 escape(&file.path),
                 driver,
                 escape(&family),
                 escape(&route),
+                escape(&confidence),
                 escape(&why)
             );
         }
-        doc.push_str("</tbody>\n</table>\n</section>\n");
+        doc.push_str("</tbody>\n</table>\n</details>\n</section>\n");
     }
 
     // ---- Footer ----------------------------------------------------------
@@ -608,13 +731,9 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
     );
     let _ = writeln!(
         doc,
-        "<p class=\"muted\">Counts: {} ready, {} to rebuild, {} to rewrite, {} undetermined, \
-         {} out of scope.</p>",
-        ready,
-        rebuild,
-        rewrite,
-        unknown,
-        report.files.len().saturating_sub(total_in_scope)
+        "<p class=\"muted\">{} ready · {} to rebuild · {} to rewrite · {} undetermined · \
+         {} unusable · {} out of scope.</p>",
+        ready, rebuild, rewrite, unknown, unusable, not_applicable
     );
     doc.push_str("</footer>\n</main>\n</body>\n</html>\n");
 
@@ -623,17 +742,26 @@ pub fn render_html(report: &ScanReport, generated_at: &str, version: &str) -> St
 
 /// The stylesheet, inline.
 ///
-/// System font stack only, no web fonts: a report must render identically on a machine with no
-/// network and no installed families. Print rules come first in spirit — this document's primary
-/// destination is a PDF attached to a decision.
+/// # Constraints this design answers to
+///
+/// * **No web fonts.** A report is opened on a machine with no network and often no installed
+///   families, so it uses the system stack and renders identically everywhere.
+/// * **No JavaScript.** Nothing in it can fail to run, and `<details>` gives collapsible
+///   sections natively — which matters for a document holding hundreds of rows.
+/// * **Print first in spirit.** The primary destination is a PDF attached to a decision, so the
+///   colour is carried by the labels as well as the hue, and sections avoid breaking across
+///   pages.
+/// * **One accent per meaning.** Colour is used to distinguish the four actions and nothing
+///   else, so a reader learns the mapping once.
 const STYLE: &str = r#"<style>
 :root{
-  --ink:#14161a; --muted:#5b6470; --rule:#e2e6ec; --bg:#ffffff; --wash:#f7f9fc;
-  --ready:#0f7b4f; --ready-bg:#e8f6ef;
-  --rebuild:#8a5300; --rebuild-bg:#fdf3e2;
-  --rewrite:#a32020; --rewrite-bg:#fdecec;
-  --unknown:#3d4a5c; --unknown-bg:#eef1f6;
-  --unusable:#6b2d5c; --unusable-bg:#f7ecf4;
+  --ink:#111418; --ink2:#2b3440; --muted:#5f6b7a; --rule:#e3e8ef; --rule2:#cbd5e1;
+  --bg:#ffffff; --wash:#f6f8fb; --wash2:#eef2f7;
+  --ready:#0b6b45; --ready-bg:#e6f5ee; --ready-line:#0b6b45;
+  --rebuild:#8a4b00; --rebuild-bg:#fdf1df; --rebuild-line:#b06a00;
+  --rewrite:#9d1c1c; --rewrite-bg:#fdeaea; --rewrite-line:#9d1c1c;
+  --unknown:#3a4657; --unknown-bg:#edf1f6; --unknown-line:#7a8798;
+  --unusable:#6a2a56; --unusable-bg:#f8ecf4; --unusable-line:#6a2a56;
   --na:#6b7280; --na-bg:#f3f4f6;
 }
 *{box-sizing:border-box}
@@ -641,58 +769,141 @@ html{-webkit-text-size-adjust:100%}
 body{
   margin:0; background:var(--bg); color:var(--ink);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  font-size:15px; line-height:1.6;
+  font-size:15px; line-height:1.6; font-variant-numeric:tabular-nums;
 }
-main{max-width:60rem;margin:0 auto;padding:2.5rem 1.5rem 4rem}
-h1{font-size:1.9rem;line-height:1.2;margin:.2rem 0 .9rem;letter-spacing:-.02em;word-break:break-word}
-h2{font-size:1.15rem;margin:2.6rem 0 .6rem;letter-spacing:-.01em}
-p{margin:.6rem 0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em}
-.muted,.of{color:var(--muted);font-weight:400}
-.eyebrow{text-transform:uppercase;letter-spacing:.09em;font-size:.72rem;color:var(--muted);margin:0}
-header{border-bottom:2px solid var(--ink);padding-bottom:1.2rem}
-dl.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));gap:.9rem 1.6rem;margin:1.2rem 0 0}
+
+/* ---- layout: a fixed rail on wide screens, a stacked page on narrow ---- */
+nav.side{
+  position:fixed; inset:0 auto 0 0; width:15.5rem; padding:1.6rem 1.1rem;
+  background:var(--wash); border-right:1px solid var(--rule); overflow-y:auto;
+  font-size:.82rem;
+}
+nav.side .navtitle{font-weight:650;margin:0 0 .8rem;word-break:break-all;line-height:1.35}
+nav.side ol{list-style:none;margin:0;padding:0}
+nav.side li{margin:.1rem 0}
+nav.side a{
+  display:flex;justify-content:space-between;gap:.5rem;align-items:baseline;
+  padding:.28rem .5rem;border-radius:5px;color:var(--ink2);text-decoration:none;
+}
+nav.side a:hover,nav.side a:focus-visible{background:var(--wash2);color:var(--ink)}
+nav.side .navcount{color:var(--muted);font-size:.78rem}
+main{max-width:58rem;margin:0 auto;padding:2.4rem 2rem 4rem 18rem}
+@media (max-width:60rem){
+  nav.side{position:static;width:auto;border-right:0;border-bottom:1px solid var(--rule);padding:1rem 1.2rem}
+  nav.side ol{display:flex;flex-wrap:wrap;gap:.2rem .6rem}
+  main{max-width:none;padding:1.6rem 1.2rem 3rem}
+}
+
+/* ---- type ---- */
+h1{font-size:1.85rem;line-height:1.22;margin:.15rem 0 .9rem;letter-spacing:-.021em;word-break:break-word}
+h2{font-size:1.05rem;margin:0 0 .7rem;letter-spacing:.01em;text-transform:uppercase;font-weight:650;color:var(--ink2)}
+p{margin:.55rem 0}
+.eyebrow{text-transform:uppercase;letter-spacing:.1em;font-size:.7rem;color:var(--muted);margin:0}
+.muted{color:var(--muted)}
+.lede{color:var(--ink2);font-size:.92rem;max-width:44rem}
+
+/* ---- header ---- */
+header{border-bottom:2px solid var(--ink);padding-bottom:1.15rem;margin-bottom:1.6rem}
+dl.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:.85rem 1.5rem;margin:1.15rem 0 0}
 dl.meta div{margin:0}
-dl.meta dt{font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
-dl.meta dd{margin:.1rem 0 0;font-size:.9rem}
-.headline{margin-top:2rem;padding:1.4rem 1.6rem;background:var(--wash);border:1px solid var(--rule);border-radius:8px}
-.headline h2{margin:0 0 .3rem;font-size:.72rem;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
-.big{margin:.1rem 0 .3rem;font-size:1.05rem}
-.big strong{font-size:2.6rem;line-height:1;letter-spacing:-.03em;vertical-align:-.08em}
-.big.unavailable{font-size:1.5rem;font-weight:600;color:var(--unknown)}
-.sub{margin:0;color:var(--muted);font-size:.9rem}
-table{width:100%;border-collapse:collapse;margin:.8rem 0 0;font-size:.9rem}
-th,td{text-align:left;vertical-align:top;padding:.55rem .7rem;border-bottom:1px solid var(--rule)}
-thead th{font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);border-bottom:1px solid var(--ink);white-space:nowrap}
-.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-table.score td:nth-child(3){color:var(--muted);font-size:.86rem}
-table.files td.path{max-width:22rem;word-break:break-all}
-table.files td.why{color:var(--muted);font-size:.84rem}
-tbody tr:last-child td,tbody tr:last-child th{border-bottom:1px solid var(--rule)}
-.badge{display:inline-block;padding:.12rem .5rem;border-radius:999px;font-size:.78rem;font-weight:600;white-space:nowrap}
+dl.meta dt{font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+dl.meta dd{margin:.12rem 0 0;font-size:.88rem}
+dl.meta dd .muted{display:block;font-size:.8rem;margin-top:.1rem}
+
+/* ---- readiness ---- */
+section{margin:2.2rem 0 0}
+.readiness{background:var(--wash);border:1px solid var(--rule);border-radius:10px;padding:1.3rem 1.5rem 1.5rem}
+.gauge{display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap}
+.figure{margin:.1rem 0;font-size:3.1rem;line-height:1;font-weight:700;letter-spacing:-.035em;color:var(--ready)}
+.figure .pct{font-size:1.4rem;font-weight:600;margin-left:.08em;vertical-align:.28em;color:var(--muted)}
+.figure.unavailable{color:var(--unknown)}
+.caption{margin:0;color:var(--muted);font-size:.85rem}
+.bar{display:flex;height:.62rem;border-radius:99px;overflow:hidden;margin:1.1rem 0 0;background:var(--rule)}
+.bar .seg{display:block;height:100%}
+.s-ready{background:var(--ready-line)}
+.s-rebuild{background:var(--rebuild-line)}
+.s-rewrite{background:var(--rewrite-line)}
+.s-unknown{background:var(--unknown-line)}
+.s-unusable{background:var(--unusable-line)}
+.s-not-applicable{background:var(--na)}
+
+/* ---- action cards ---- */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr));gap:.7rem;margin:.2rem 0 1.1rem}
+.card{
+  display:block;padding:.8rem .95rem;border:1px solid var(--rule);border-left-width:4px;border-radius:8px;
+  text-decoration:none;color:var(--ink);background:var(--bg);
+}
+.card:hover,.card:focus-visible{background:var(--wash)}
+.cardlabel{display:block;font-size:.78rem;font-weight:600;line-height:1.3}
+.cardnum{display:block;font-size:1.75rem;font-weight:700;letter-spacing:-.02em;line-height:1.15;margin:.15rem 0}
+.cardshare{display:block;font-size:.75rem;color:var(--muted)}
+.c-ready{border-left-color:var(--ready-line)}
+.c-rebuild{border-left-color:var(--rebuild-line)}
+.c-rewrite{border-left-color:var(--rewrite-line)}
+.c-unknown{border-left-color:var(--unknown-line)}
+.c-unusable{border-left-color:var(--unusable-line)}
+
+/* ---- tables ---- */
+table{width:100%;border-collapse:collapse;margin:.5rem 0 0;font-size:.88rem}
+th,td{text-align:left;vertical-align:top;padding:.5rem .6rem;border-bottom:1px solid var(--rule)}
+thead th{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);border-bottom:1px solid var(--rule2);white-space:nowrap;font-weight:600}
+.num{text-align:right;white-space:nowrap}
+table.score td:nth-child(3){color:var(--ink2);font-size:.85rem;max-width:34rem}
+table.files td.path{word-break:break-all;min-width:12rem}
+table.files td.why{color:var(--muted);font-size:.82rem;max-width:24rem}
+.row-muted td,.row-muted th{color:var(--muted)}
+
+/* ---- badges ---- */
+.badge{display:inline-block;padding:.14rem .55rem;border-radius:99px;font-size:.76rem;font-weight:650;white-space:nowrap}
 .b-ready{background:var(--ready-bg);color:var(--ready)}
 .b-rebuild{background:var(--rebuild-bg);color:var(--rebuild)}
 .b-rewrite{background:var(--rewrite-bg);color:var(--rewrite)}
 .b-unknown{background:var(--unknown-bg);color:var(--unknown)}
 .b-unusable{background:var(--unusable-bg);color:var(--unusable)}
 .b-na{background:var(--na-bg);color:var(--na)}
-.row-muted td,.row-muted th{color:var(--muted)}
-.tag{display:inline-block;margin-left:.35rem;padding:.05rem .4rem;border:1px solid var(--rule);border-radius:4px;font-size:.7rem;color:var(--muted);white-space:nowrap}
-.limits{background:var(--rebuild-bg);border:1px solid #e8d5b0;border-radius:8px;padding:.4rem 1.4rem 1rem}
+.tag{display:inline-block;margin-left:.3rem;padding:.03rem .38rem;border:1px solid var(--rule2);border-radius:4px;font-size:.68rem;color:var(--muted);white-space:nowrap}
+
+/* ---- limitations ---- */
+.limits{background:var(--rebuild-bg);border:1px solid #e8d5b0;border-radius:10px;padding:.9rem 1.4rem 1.1rem}
 .limits h2{color:var(--rebuild)}
-.limits ul{margin:.4rem 0 0;padding-left:1.1rem}
-.limits li{margin:.35rem 0;font-size:.88rem}
-.lede{color:var(--muted);font-size:.88rem;margin:.2rem 0 0}
-.count{color:var(--muted);font-weight:400}
-footer{margin-top:3.5rem;padding-top:1.2rem;border-top:1px solid var(--rule);font-size:.82rem;color:var(--muted)}
+.limits ul{margin:.3rem 0 0;padding-left:1.1rem}
+.limits li{margin:.35rem 0;font-size:.87rem;color:var(--ink2)}
+
+/* ---- collapsible detail ---- */
+.detail details{border:1px solid var(--rule);border-radius:10px;padding:.2rem .2rem .5rem;background:var(--bg)}
+.detail summary{
+  display:flex;align-items:center;gap:.6rem;cursor:pointer;padding:.7rem .85rem;border-radius:8px;
+  list-style:none;
+}
+.detail summary::-webkit-details-marker{display:none}
+.detail summary::before{
+  content:"▸";color:var(--muted);font-size:.75rem;transition:transform .12s ease;
+}
+.detail details[open] summary::before{transform:rotate(90deg)}
+.detail summary:hover,.detail summary:focus-visible{background:var(--wash)}
+.sumcount{color:var(--muted);font-size:.82rem}
+.detail .lede{padding:0 .85rem}
+.detail table{width:calc(100% - 1.7rem);margin:.4rem .85rem .2rem}
+
+/* ---- footer ---- */
+footer{margin-top:3rem;padding-top:1.1rem;border-top:1px solid var(--rule);font-size:.8rem;color:var(--muted)}
+footer p{margin:.3rem 0}
+
+/* ---- print: the primary destination ---- */
 @media print{
-  body{font-size:10.5pt}
-  main{max-width:none;padding:0}
-  .headline,.limits{break-inside:avoid}
-  section.detail{break-before:auto}
-  table.files tr{break-inside:avoid}
+  body{font-size:10pt}
+  nav.side{display:none}
+  main{max-width:none;padding:0;margin:0}
+  section{margin:1.4rem 0 0}
+  .readiness,.limits,.detail details{break-inside:avoid}
+  .detail details{break-before:auto;border:0;padding:0}
+  .detail summary{padding:.2rem 0}
+  .detail summary::before{content:""}
   thead{display:table-header-group}
+  table.files tr{break-inside:avoid}
   a{color:inherit;text-decoration:none}
+  .cards{break-inside:avoid}
 }
 </style>
 "#;
@@ -925,16 +1136,38 @@ mod tests {
 
     #[test]
     fn an_undetermined_tree_does_not_claim_a_percentage() {
+        // The counterpart of `a_percentage_from_no_data_is_none_not_zero`, checked through the
+        // rendered document rather than through the arithmetic. A tree where every refusal came
+        // from the audit machine has a readiness of "no answer", and the page must say that
+        // instead of printing a number that reads as a verdict on the software.
         let files = vec![routed("a.exe", "refused", true, false, false, true)];
         let html = render_html(
             &report(files, MigrationTarget::WindowsOnArm),
             "2026-10-19",
             "0.1.0",
         );
-        assert!(html.contains("Not determinable"));
+
         assert!(
-            !html.contains("0% "),
-            "must not answer a question it could not ask"
+            html.contains("not determinable"),
+            "the page must say the readiness is undetermined"
+        );
+        assert!(
+            html.contains("figure unavailable"),
+            "the gauge must be rendered in its unavailable state"
+        );
+
+        // The real assertion: no digit is presented as the readiness figure. Matching a bare
+        // "0%" would also hit CSS widths and the bar segments, so this looks specifically at the
+        // gauge element, which is where a percentage would be a claim.
+        let gauge_start = html.find("class=\"gauge\"").expect("a gauge");
+        let gauge_end = html[gauge_start..]
+            .find("</div>")
+            .map(|offset| gauge_start + offset)
+            .expect("a closing tag");
+        let gauge = &html[gauge_start..gauge_end];
+        assert!(
+            !gauge.contains('%'),
+            "the gauge must not present a percentage it could not compute: {gauge}"
         );
     }
 
