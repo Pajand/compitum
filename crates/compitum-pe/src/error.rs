@@ -43,6 +43,31 @@ pub enum PeError {
         /// Observed value.
         value: u64,
     },
+    /// A section's raw data lies outside the file.
+    ///
+    /// # Why this is an error rather than a warning
+    ///
+    /// A section table is the map from virtual addresses to file offsets. If an entry points
+    /// past the end of the file, the map is wrong, and everything derived from it — the
+    /// instruction scan, the RVA-to-offset conversions, the imports — is reading bytes that were
+    /// never there.
+    ///
+    /// The measured consequence of returning an `Ok` here was severe: a file whose section
+    /// pointed past EOF parsed cleanly, the scanner found no code to examine, and the router
+    /// reported `NATIVE` at 100% confidence with no translation needed. A corrupt binary received
+    /// a clean bill of health, and the verdict was indistinguishable from a real one.
+    SectionOutOfBounds {
+        /// Index of the offending section in the table.
+        index: usize,
+        /// Its name, as far as it is printable.
+        name: String,
+        /// Where it claims its data starts.
+        raw_offset: u32,
+        /// How much data it claims to have.
+        raw_size: u32,
+        /// How long the file actually is.
+        file_len: usize,
+    },
 }
 
 impl fmt::Display for PeError {
@@ -73,6 +98,18 @@ impl fmt::Display for PeError {
             PeError::InvalidField { field, value } => {
                 write!(f, "field `{field}` holds an impossible value: {value}")
             }
+            PeError::SectionOutOfBounds {
+                index,
+                name,
+                raw_offset,
+                raw_size,
+                file_len,
+            } => write!(
+                f,
+                "section {index} (`{name}`) claims {raw_size} byte(s) at file offset {raw_offset}, \
+                 which runs past the end of a {file_len}-byte file; the section table cannot be \
+                 trusted, so nothing about this image can"
+            ),
         }
     }
 }

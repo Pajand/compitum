@@ -676,7 +676,13 @@ pub fn parse(data: &[u8]) -> Result<PeImage> {
     };
 
     let section_offset = optional_offset + usize::from(coff.optional_header_size);
-    let sections = parse_sections(data, section_offset, coff.section_count)?;
+    let size_of_headers = optional.as_ref().map_or(0, |header| header.size_of_headers);
+    let sections = parse_sections(
+        data,
+        section_offset,
+        coff.section_count,
+        u64::from(size_of_headers),
+    )?;
 
     let mut image = PeImage {
         coff,
@@ -790,6 +796,29 @@ fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeade
     let file_alignment = u32_at(data, offset + OFF_FILE_ALIGNMENT)?;
     let size_of_image = u32_at(data, offset + OFF_SIZE_OF_IMAGE)?;
     let size_of_headers = u32_at(data, offset + OFF_SIZE_OF_HEADERS)?;
+
+    // `SizeOfHeaders` is the rounded total of the DOS header, the PE header, the optional
+    // header and the section table — all of which are physically present in the file. A value
+    // larger than the file therefore describes headers that do not exist, and nothing derived
+    // from the header can be trusted.
+    //
+    // Added after an audit found the field was never validated. Three consequences followed,
+    // and the second is the one that matters:
+    //
+    //   * a file claiming `SizeOfHeaders = 0xFFFFFF00` parsed as healthy;
+    //   * the section-bounds exemption compared offsets against that field, so a corrupt value
+    //     widened the exemption until it covered every possible offset, disabling the check
+    //     entirely — a guard defeated by the very field it was guarding against;
+    //   * the image then received `NATIVE` at 100% confidence.
+    //
+    // A number that describes physical structures has to be consistent with the physical file.
+    if u64::from(size_of_headers) > data.len() as u64 {
+        return Err(PeError::InvalidField {
+            field: "SizeOfHeaders",
+            value: u64::from(size_of_headers),
+        });
+    }
+
     let subsystem = Subsystem(u16_at(data, offset + OFF_SUBSYSTEM)?);
     let dll_characteristics = u16_at(data, offset + OFF_DLL_CHARACTERISTICS)?;
 
@@ -852,18 +881,64 @@ fn parse_optional(data: &[u8], offset: usize, size: u16) -> Result<OptionalHeade
     })
 }
 
-fn parse_sections(data: &[u8], offset: usize, count: u16) -> Result<Vec<Section>> {
+fn parse_sections(
+    data: &[u8],
+    offset: usize,
+    count: u16,
+    size_of_headers: u64,
+) -> Result<Vec<Section>> {
     let mut sections = Vec::with_capacity(usize::from(count));
+
     for index in 0..usize::from(count) {
         let base = offset + index * SECTION_HEADER_SIZE;
-        sections.push(Section {
+        let section = Section {
             name: fixed_ascii(data, base, 8)?,
             virtual_size: u32_at(data, base + 8)?,
             virtual_address: u32_at(data, base + 12)?,
             raw_size: u32_at(data, base + 16)?,
             raw_offset: u32_at(data, base + 20)?,
             characteristics: u32_at(data, base + 36)?,
-        });
+        };
+
+        // The section table is the map from virtual addresses to file offsets. An entry that
+        // points past the end of the file makes that map wrong, and everything derived from it —
+        // the instruction scan, every RVA conversion, the import walk — then reads bytes that
+        // were never there.
+        //
+        // Measured before this check existed: a file whose section pointed past EOF parsed as
+        // valid, the scanner examined zero bytes, and the router returned `NATIVE` at 100%
+        // confidence. A corrupt binary received a clean bill of health, and the verdict was
+        // indistinguishable from a real one. That is the failure this project keeps having to
+        // correct — a confident answer derived from no evidence — so it is a hard error here.
+        //
+        // Two exemptions, both real rather than conveniences:
+        //
+        //   * `raw_size == 0` — a `.bss`-style section occupies no file space, and its offset
+        //     is meaningless. Rejecting that would refuse legitimate images.
+        //   * a section wholly inside the headers — the PE format permits pointers below
+        //     `SizeOfHeaders`, and a few linkers emit them.
+        //
+        // The header exemption is bounded by the real file length, and that bound is load
+        // bearing rather than defensive. `SizeOfHeaders` is a field in the file, so a corrupt
+        // value there would otherwise widen the exemption to cover every possible offset: a file
+        // with `SizeOfHeaders = 0xFFFFFF00` made every section look header-resident, the check
+        // never fired, and the corrupt image went on to be reported as healthy. The exemption
+        // has to be no larger than the thing it is an exemption about.
+        let file_len = data.len() as u64;
+        let header_limit = size_of_headers.min(file_len);
+        let end = u64::from(section.raw_offset) + u64::from(section.raw_size);
+        let starts_in_headers = u64::from(section.raw_offset) < header_limit;
+        if section.raw_size > 0 && end > file_len && !starts_in_headers {
+            return Err(PeError::SectionOutOfBounds {
+                index,
+                name: section.name.clone(),
+                raw_offset: section.raw_offset,
+                raw_size: section.raw_size,
+                file_len: data.len(),
+            });
+        }
+
+        sections.push(section);
     }
     Ok(sections)
 }
@@ -1193,6 +1268,139 @@ mod tests {
             // Must never panic, whether it errors or parses.
             let _ = parse(&full[..cut.min(full.len())]);
         }
+    }
+
+    /// Reads the 32-bit field at `at` in an image, for building corrupt variants.
+    fn read_u32(data: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(data[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    /// Writes a 32-bit field, returning the mutated image.
+    fn put_u32(data: &[u8], at: usize, value: u32) -> Vec<u8> {
+        let mut out = data.to_vec();
+        out[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        out
+    }
+
+    /// The file offset of the optional header in a synthetic image.
+    fn optional_header_offset(data: &[u8]) -> usize {
+        let lfanew = read_u32(data, 0x3C) as usize;
+        // PE signature (4 bytes) then the COFF header (20 bytes).
+        lfanew + 4 + 20
+    }
+
+    #[test]
+    fn a_size_of_headers_field_larger_than_the_file_is_rejected() {
+        // THE REGRESSION GUARD for a defect found by adversarial audit.
+        //
+        // `SizeOfHeaders` describes headers that are physically present in the file, so a value
+        // larger than the file describes structures that do not exist. It was never validated,
+        // and the consequence was not merely a loose field: the section-bounds check exempted
+        // offsets below `SizeOfHeaders`, so a corrupt value there widened the exemption until it
+        // covered every possible offset and disabled the bounds check entirely. A guard defeated
+        // by the very field it was guarding against.
+        //
+        // A file in that state went on to be reported NATIVE at 100% confidence.
+        let base = synthetic_pe(0xAA64, 3, false);
+        let at = optional_header_offset(&base) + 0x3C;
+        let corrupt = put_u32(&base, at, 0xFFFF_FF00);
+
+        match parse(&corrupt) {
+            Err(PeError::InvalidField { field, value }) => {
+                assert_eq!(field, "SizeOfHeaders");
+                assert_eq!(value, 0xFFFF_FF00);
+            }
+            other => panic!("expected SizeOfHeaders to be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_section_pointing_past_the_end_of_the_file_is_rejected() {
+        // The section table is the map from virtual addresses to file offsets. An entry past
+        // EOF makes the map wrong, so the instruction scan and every RVA conversion then read
+        // bytes that were never there — and the router nonetheless returned a confident verdict.
+        let base = synthetic_pe(0xAA64, 3, false);
+        let lfanew = read_u32(&base, 0x3C) as usize;
+        let coff = lfanew + 4;
+        let section_table = coff
+            + 20
+            + usize::from(u16::from_le_bytes(
+                base[coff + 16..coff + 18].try_into().expect("two bytes"),
+            ));
+        let raw_offset_at = section_table + 20;
+
+        let corrupt = put_u32(&base, raw_offset_at, 0xFFFF_0000);
+        match parse(&corrupt) {
+            Err(PeError::SectionOutOfBounds { index, .. }) => assert_eq!(index, 0),
+            other => panic!("expected the section to be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_section_size_that_overflows_when_added_is_rejected() {
+        // `raw_offset + raw_size` must be computed in 64 bits. In 32 it wraps to a small number
+        // that passes any naive comparison against the file length.
+        let base = synthetic_pe(0xAA64, 3, false);
+        let lfanew = read_u32(&base, 0x3C) as usize;
+        let coff = lfanew + 4;
+        let section_table = coff
+            + 20
+            + usize::from(u16::from_le_bytes(
+                base[coff + 16..coff + 18].try_into().expect("two bytes"),
+            ));
+        let raw_size_at = section_table + 16;
+
+        let corrupt = put_u32(&base, raw_size_at, 0xFFFF_FFFF);
+        assert!(matches!(
+            parse(&corrupt),
+            Err(PeError::SectionOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn a_section_with_no_file_backing_is_still_accepted() {
+        // The exemption that keeps the bounds check honest. A `.bss`-style section occupies no
+        // file space and its offset is meaningless, so rejecting it would refuse legitimate
+        // images — and a check that refuses healthy input is as damaging as one that accepts
+        // corrupt input.
+        let base = synthetic_pe(0xAA64, 3, false);
+        let lfanew = read_u32(&base, 0x3C) as usize;
+        let coff = lfanew + 4;
+        let section_table = coff
+            + 20
+            + usize::from(u16::from_le_bytes(
+                base[coff + 16..coff + 18].try_into().expect("two bytes"),
+            ));
+
+        // Zero raw size with an absurd offset: legitimate, because nothing is read from it.
+        let no_files = put_u32(&base, section_table + 16, 0);
+        assert!(
+            parse(&no_files).is_ok(),
+            "a section with no file backing must not be refused"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_size_of_headers_cannot_disable_the_section_check() {
+        // The specific interaction that made the defect survive a first fix attempt: the section
+        // exemption is bounded by `SizeOfHeaders`, so a corrupt `SizeOfHeaders` used to widen it
+        // without limit. Both fields corrupt at once must still be refused.
+        let base = synthetic_pe(0xAA64, 3, false);
+        let lfanew = read_u32(&base, 0x3C) as usize;
+        let coff = lfanew + 4;
+        let section_table = coff
+            + 20
+            + usize::from(u16::from_le_bytes(
+                base[coff + 16..coff + 18].try_into().expect("two bytes"),
+            ));
+
+        let mut corrupt = put_u32(&base, section_table + 20, 0xFFFF_0000);
+        corrupt = put_u32(&corrupt, optional_header_offset(&base) + 0x3C, 0xFFFF_FF00);
+
+        assert!(
+            parse(&corrupt).is_err(),
+            "corrupt SizeOfHeaders must not be able to exempt a corrupt section"
+        );
     }
 
     #[test]
